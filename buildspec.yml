@@ -1,0 +1,37 @@
+version: 0.2
+
+# Built by the CodeBuild project in cloudformation/03-cicd.yaml.
+# The project MUST use an ARM64 build environment (AgentCore requires ARM64
+# images). Required env vars are injected by the CodeBuild project:
+#   ECR_REPO_URI  - <acct>.dkr.ecr.<region>.amazonaws.com/<repo>
+#   AWS_REGION, AWS_ACCOUNT_ID
+
+env:
+  variables:
+    DOCKER_BUILDKIT: "1"
+
+phases:
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}"
+      - IMAGE_TAG="${IMAGE_TAG:0:8}"
+      - echo "Image tag = $IMAGE_TAG"
+  build:
+    commands:
+      - echo "Building ARM64 image..."
+      - docker build --platform linux/arm64 -t "$ECR_REPO_URI:$IMAGE_TAG" -t "$ECR_REPO_URI:latest" src
+  post_build:
+    commands:
+      - echo "Pushing image to ECR..."
+      - docker push "$ECR_REPO_URI:$IMAGE_TAG"
+      - docker push "$ECR_REPO_URI:latest"
+      # Emit the fully-qualified image URI (with immutable tag) for the next
+      # pipeline stage / for you to feed into Layer 4 as ContainerImageUri.
+      - printf '{"ContainerImageUri":"%s:%s"}' "$ECR_REPO_URI" "$IMAGE_TAG" > imageDetail.json
+      - cat imageDetail.json
+
+artifacts:
+  files:
+    - imageDetail.json

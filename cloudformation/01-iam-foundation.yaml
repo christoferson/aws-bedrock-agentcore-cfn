@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Layer 1 - Service artifacts. IAM roles for the AgentCore Runtime execution
+  role and the CI/CD pipeline (CodeBuild, CodePipeline). Deploy first; feed the
+  Output role ARNs into later layers as explicit parameters.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: bedrock-agentcore
+    Description: Prefix for resource names. Keep the "bedrock-agentcore" prefix so resource ARNs match service naming conventions.
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, test, prod]
+  AgentName:
+    Type: String
+    Description: >
+      AgentCore Runtime agent name (pattern [a-zA-Z][a-zA-Z0-9_]{0,47}). The
+      execution role's workload-identity permission is scoped to this name, so
+      it must match AgentRuntimeName in Layer 4.
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9_]{0,47}"
+  ArtifactBucketName:
+    Type: String
+    Default: ""
+    Description: Optional. Name of the S3 artifact bucket used by CodePipeline (created in Layer 3). Leave blank to allow any bedrock-agentcore-* bucket.
+
+Conditions:
+  HasArtifactBucket: !Not [!Equals [!Ref ArtifactBucketName, ""]]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # AgentCore Runtime execution role - assumed by bedrock-agentcore to RUN the
+  # agent. Policy mirrors aws-documentation/runtime-permissions.md (least
+  # privilege; scoped to this account/region/agent).
+  # ---------------------------------------------------------------------------
+  RuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-runtime-exec"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AssumeRolePolicy
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: runtime-exec
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ECRImageAccess
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-*"
+              - Sid: ECRTokenAccess
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: LogsGroupStream
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - Sid: LogsDescribe
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: bedrock-agentcore
+              - Sid: GetAgentAccessToken
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                  - bedrock-agentcore:GetWorkloadAccessTokenForUserId
+                Resource:
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/${AgentName}-*"
+              - Sid: BedrockModelInvocation
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - "arn:aws:bedrock:*::foundation-model/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # ---------------------------------------------------------------------------
+  # CodeBuild service role - builds & pushes the ARM64 image to ECR.
+  # ---------------------------------------------------------------------------
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-codebuild"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codebuild
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-*"
+              - Sid: ECRPushPull
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-*"
+              - Sid: ECRAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                Resource:
+                  !If
+                    - HasArtifactBucket
+                    - - !Sub "arn:aws:s3:::${ArtifactBucketName}"
+                      - !Sub "arn:aws:s3:::${ArtifactBucketName}/*"
+                    - - !Sub "arn:aws:s3:::${ProjectName}-*"
+                      - !Sub "arn:aws:s3:::${ProjectName}-*/*"
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # ---------------------------------------------------------------------------
+  # CodePipeline service role - orchestrates Source -> Build (-> optional deploy).
+  # ---------------------------------------------------------------------------
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-codepipeline"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codepipeline.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  !If
+                    - HasArtifactBucket
+                    - - !Sub "arn:aws:s3:::${ArtifactBucketName}"
+                      - !Sub "arn:aws:s3:::${ArtifactBucketName}/*"
+                    - - !Sub "arn:aws:s3:::${ProjectName}-*"
+                      - !Sub "arn:aws:s3:::${ProjectName}-*/*"
+              - Sid: CodeCommitSource
+                Effect: Allow
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Resource: !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${ProjectName}-*"
+              - Sid: TriggerCodeBuild
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${ProjectName}-*"
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+  RuntimeExecutionRoleArn:
+    Description: Feed into Layer 4 as RuntimeExecutionRoleArn.
+    Value: !GetAtt RuntimeExecutionRole.Arn
+  CodeBuildRoleArn:
+    Description: Feed into Layer 3 as CodeBuildRoleArn.
+    Value: !GetAtt CodeBuildRole.Arn
+  CodePipelineRoleArn:
+    Description: Feed into Layer 3 as CodePipelineRoleArn.
+    Value: !GetAtt CodePipelineRole.Arn
