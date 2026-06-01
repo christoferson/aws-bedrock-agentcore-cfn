@@ -1,39 +1,39 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Layer 4 - AgentCore Runtime. Creates AWS::BedrockAgentCore::Runtime in VPC
-  network mode, pointing at the ARM64 image in ECR (Layer 3) and the execution
-  role (Layer 1) and subnets/SG (Layer 2). Updating ContainerImageUri creates a
-  new immutable runtime version and auto-updates the DEFAULT endpoint (no
-  downtime). Deploy this LAST, after the first image has been pushed.
+  The AgentCore Runtime that hosts the Strands agent. Creates
+  AWS::BedrockAgentCore::Runtime in VPC network mode, running the ARM64 agent
+  image from ECR inside private subnets, assuming the runtime execution role to
+  invoke Bedrock models. Updating the container image rolls a new immutable
+  runtime version and the DEFAULT endpoint with no downtime.
 
 Parameters:
-  ProjectName:
+  ApplicationName:
     Type: String
     Default: bedrock-agentcore
   Environment:
     Type: String
-    Default: prod
-    AllowedValues: [dev, test, prod]
+    Default: prd
+    AllowedValues: [dev, stg, prd]
   AgentName:
     Type: String
-    Description: AgentRuntimeName (pattern [a-zA-Z][a-zA-Z0-9_]{0,47}). MUST match the AgentName used in Layer 1.
+    Description: AgentRuntimeName (pattern [a-zA-Z][a-zA-Z0-9_]{0,47}).
     AllowedPattern: "[a-zA-Z][a-zA-Z0-9_]{0,47}"
   ContainerImageUri:
     Type: String
     Description: >
       Full ECR image URI WITH tag or digest, e.g.
-      123456789012.dkr.ecr.us-east-1.amazonaws.com/bedrock-agentcore-prod:ab12cd34
-      (take EcrRepositoryUri from Layer 3 + the tag from the build's imageDetail.json).
+      123456789012.dkr.ecr.us-east-1.amazonaws.com/bedrock-agentcore-prd:ab12cd34
+      (EcrRepositoryUri from the CI/CD stack + the tag from imageDetail.json).
     AllowedPattern: "^\\d{12}\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/.+[:@]\\S+$"
-  RuntimeExecutionRoleArn:
+  AgentCoreRuntimeExecutionRoleArn:
     Type: String
-    Description: From Layer 1 Output RuntimeExecutionRoleArn.
-  RuntimeSubnetIds:
+    Description: From the IAM foundation stack Output AgentCoreRuntimeExecutionRoleArn.
+  AgentCoreRuntimePrivateSubnetList:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: From Layer 2 Output PrivateSubnetIds.
-  RuntimeSecurityGroupIds:
+    Description: From the network stack Output PrivateSubnetIds.
+  AgentCoreRuntimeSecurityGroupList:
     Type: List<AWS::EC2::SecurityGroup::Id>
-    Description: From Layer 2 Output RuntimeSecurityGroupId.
+    Description: From the network stack Output RuntimeSecurityGroupId.
   Protocol:
     Type: String
     Default: HTTP
@@ -48,8 +48,8 @@ Resources:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
       AgentRuntimeName: !Ref AgentName
-      Description: !Sub "${ProjectName} Strands agent (${Environment})"
-      RoleArn: !Ref RuntimeExecutionRoleArn
+      Description: !Sub "${ApplicationName} Strands agent (${Environment})"
+      RoleArn: !Ref AgentCoreRuntimeExecutionRoleArn
       ProtocolConfiguration: !Ref Protocol
       AgentRuntimeArtifact:
         ContainerConfiguration:
@@ -57,12 +57,12 @@ Resources:
       NetworkConfiguration:
         NetworkMode: VPC
         NetworkModeConfig:
-          Subnets: !Ref RuntimeSubnetIds
-          SecurityGroups: !Ref RuntimeSecurityGroupIds
+          Subnets: !Ref AgentCoreRuntimePrivateSubnetList
+          SecurityGroups: !Ref AgentCoreRuntimeSecurityGroupList
       EnvironmentVariables:
         BEDROCK_MODEL_ID: !Ref BedrockModelId
       Tags:
-        Project: !Ref ProjectName
+        Application: !Ref ApplicationName
         Environment: !Ref Environment
 
 Outputs:
