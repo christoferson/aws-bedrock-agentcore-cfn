@@ -1,27 +1,36 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Layer 2 - Networking. VPC with private subnets, a security group for the
-  AgentCore Runtime, and PrivateLink VPC endpoints for private egress to the
-  AWS services the runtime needs (Bedrock, AgentCore, ECR, S3, Logs, X-Ray).
-  Outputs the subnet IDs and SG ID to feed into Layer 4 (NetworkMode = VPC).
+  Networking for the AgentCore Runtime: a VPC with public and private subnets
+  across two Availability Zones, an internet gateway for the public subnets, a
+  NAT gateway giving the private subnets outbound internet access, and a
+  security group for the runtime ENIs. The runtime runs in the private subnets
+  and reaches AWS services (Bedrock, AgentCore, ECR, CloudWatch, X-Ray) through
+  the NAT gateway. Public subnets are available for future internet-facing
+  resources.
 
 Parameters:
-  ProjectName:
+  ApplicationName:
     Type: String
     Default: bedrock-agentcore
   Environment:
     Type: String
-    Default: prod
-    AllowedValues: [dev, test, prod]
+    Default: prd
+    AllowedValues: [dev, stg, prd]
   VpcCidr:
     Type: String
     Default: 10.0.0.0/16
-  PrivateSubnet1Cidr:
+  PublicSubnetOneCidr:
+    Type: String
+    Default: 10.0.0.0/24
+  PublicSubnetTwoCidr:
     Type: String
     Default: 10.0.1.0/24
-  PrivateSubnet2Cidr:
+  PrivateSubnetOneCidr:
     Type: String
-    Default: 10.0.2.0/24
+    Default: 10.0.10.0/24
+  PrivateSubnetTwoCidr:
+    Type: String
+    Default: 10.0.11.0/24
 
 Resources:
   Vpc:
@@ -31,157 +40,155 @@ Resources:
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-${Environment}-vpc" }
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-vpc" }
 
-  PrivateSubnet1:
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-igw" }
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetOne:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Ref PrivateSubnet1Cidr
+      CidrBlock: !Ref PublicSubnetOneCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-public-1" }
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetTwoCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-public-2" }
+
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetOneCidr
       AvailabilityZone: !Select [0, !GetAZs ""]
       MapPublicIpOnLaunch: false
       Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-${Environment}-private-1" }
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-private-1" }
 
-  PrivateSubnet2:
+  PrivateSubnetTwo:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Ref PrivateSubnet2Cidr
+      CidrBlock: !Ref PrivateSubnetTwoCidr
       AvailabilityZone: !Select [1, !GetAZs ""]
       MapPublicIpOnLaunch: false
       Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-${Environment}-private-2" }
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-private-2" }
+
+  # ---- Public routing: subnets reach the internet via the internet gateway ----
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-public-routetable" }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetOne
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetTwo
+
+  # ---- NAT gateway: outbound internet for the private subnets ----
+  NatGatewayElasticIpAddress:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-nat-eip" }
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayElasticIpAddress.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+      Tags:
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-nat" }
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref Vpc
       Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-${Environment}-private-rt" }
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-private-routetable" }
 
-  PrivateSubnet1RouteAssoc:
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetOneRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       RouteTableId: !Ref PrivateRouteTable
-      SubnetId: !Ref PrivateSubnet1
+      SubnetId: !Ref PrivateSubnetOne
 
-  PrivateSubnet2RouteAssoc:
+  PrivateSubnetTwoRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       RouteTableId: !Ref PrivateRouteTable
-      SubnetId: !Ref PrivateSubnet2
+      SubnetId: !Ref PrivateSubnetTwo
 
-  # Security group attached to the runtime ENIs (and the interface endpoints).
-  RuntimeSecurityGroup:
+  # Security group attached to the AgentCore Runtime ENIs. Outbound HTTPS only.
+  AgentCoreRuntimeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub "${ProjectName}-${Environment} AgentCore Runtime SG"
+      GroupDescription: !Sub "${ApplicationName}-${Environment} AgentCore Runtime security group"
       VpcId: !Ref Vpc
       SecurityGroupEgress:
-        - Description: HTTPS to AWS services / VPC endpoints
+        - Description: HTTPS to AWS services via the NAT gateway
           IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: !Ref VpcCidr
+          CidrIp: 0.0.0.0/0
       Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-${Environment}-runtime-sg" }
-
-  # SG for the interface endpoints - allow 443 from the runtime SG.
-  EndpointSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: !Sub "${ProjectName}-${Environment} VPC endpoint SG"
-      VpcId: !Ref Vpc
-      Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-${Environment}-endpoint-sg" }
-
-  EndpointIngressFromRuntime:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref EndpointSecurityGroup
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      SourceSecurityGroupId: !Ref RuntimeSecurityGroup
-      Description: HTTPS from the AgentCore Runtime SG
-
-  # S3 gateway endpoint - required for pulling ECR image layers.
-  S3GatewayEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
-      VpcEndpointType: Gateway
-      RouteTableIds:
-        - !Ref PrivateRouteTable
-
-  EcrApiEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-
-  EcrDkrEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-
-  LogsEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-
-  XRayEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.xray"
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-
-  BedrockRuntimeEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-
-  BedrockAgentCoreEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref Vpc
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-agentcore"
-      VpcEndpointType: Interface
-      PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+        - { Key: Name, Value: !Sub "${ApplicationName}-${Environment}-runtime-securitygroup" }
 
 Outputs:
   VpcId:
     Value: !Ref Vpc
+  PublicSubnetIds:
+    Description: Comma-separated public subnet IDs (for future internet-facing resources).
+    Value: !Join [",", [!Ref PublicSubnetOne, !Ref PublicSubnetTwo]]
   PrivateSubnetIds:
-    Description: Comma-separated private subnet IDs. Feed into Layer 4 as RuntimeSubnetIds.
-    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
-  RuntimeSecurityGroupId:
-    Description: Feed into Layer 4 as RuntimeSecurityGroupIds.
-    Value: !Ref RuntimeSecurityGroup
+    Description: Comma-separated private subnet IDs. Feed into the runtime stack as AgentCoreRuntimePrivateSubnetList.
+    Value: !Join [",", [!Ref PrivateSubnetOne, !Ref PrivateSubnetTwo]]
+  AgentCoreRuntimeSecurityGroupId:
+    Description: Feed into the runtime stack as AgentCoreRuntimeSecurityGroupList.
+    Value: !Ref AgentCoreRuntimeSecurityGroup

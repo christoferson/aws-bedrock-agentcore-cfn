@@ -1,24 +1,24 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  Layer 3 - CI/CD. CodeCommit repo (source), ECR repo (ARM64 image target),
-  CodeBuild project (ARM64 build env that builds & pushes the image), and a
-  CodePipeline (Source -> Build). Consumes role ARNs from Layer 1. Outputs the
-  ECR repo URI to feed into Layer 4 once the first image is pushed.
+  CI/CD for the AgentCore agent: a CodeCommit source repository, an ECR
+  repository holding the ARM64 agent image, a CodeBuild project that builds and
+  pushes that image on an ARM64 build environment, and a CodePipeline wiring
+  Source to Build. Artifacts are stored in an encrypted, TLS-only S3 bucket.
 
 Parameters:
-  ProjectName:
+  ApplicationName:
     Type: String
     Default: bedrock-agentcore
   Environment:
     Type: String
-    Default: prod
-    AllowedValues: [dev, test, prod]
+    Default: prd
+    AllowedValues: [dev, stg, prd]
   CodeBuildRoleArn:
     Type: String
-    Description: From Layer 1 Output CodeBuildRoleArn.
+    Description: From the IAM foundation stack Output CodeBuildRoleArn.
   CodePipelineRoleArn:
     Type: String
-    Description: From Layer 1 Output CodePipelineRoleArn.
+    Description: From the IAM foundation stack Output CodePipelineRoleArn.
   RepositoryBranch:
     Type: String
     Default: main
@@ -27,17 +27,17 @@ Parameters:
 Resources:
   # Source repository. NOTE: CodeCommit is only available if this account
   # already has CodeCommit access enabled (closed to new accounts since 2024).
-  SourceRepo:
+  CodeRepository:
     Type: AWS::CodeCommit::Repository
     Properties:
-      RepositoryName: !Sub "${ProjectName}-${Environment}"
+      RepositoryName: !Sub "${ApplicationName}-${Environment}"
       RepositoryDescription: AgentCore agent source (Strands).
 
   # ARM64 container image target.
-  EcrRepo:
+  ContainerRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub "${ProjectName}-${Environment}"
+      RepositoryName: !Sub "${ApplicationName}-${Environment}"
       ImageScanningConfiguration:
         ScanOnPush: true
       ImageTagMutability: MUTABLE
@@ -58,10 +58,10 @@ Resources:
             ]
           }
 
-  ArtifactBucket:
+  CodePipelineArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "${ProjectName}-${Environment}-artifacts-${AWS::AccountId}"
+      BucketName: !Sub "${ApplicationName}-${Environment}-artifacts-${AWS::AccountId}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -69,14 +69,34 @@ Resources:
         RestrictPublicBuckets: true
       BucketEncryption:
         ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: aws:kms }
+            BucketKeyEnabled: true
       VersioningConfiguration:
-        Status: Enabled
+        Status: Suspended
 
-  BuildProject:
+  # Deny any non-TLS (non-HTTPS) access to the artifact bucket.
+  CodePipelineArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodePipelineArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyNonSecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt CodePipelineArtifactBucket.Arn
+              - !Sub "${CodePipelineArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  CodeBuild:
     Type: AWS::CodeBuild::Project
     Properties:
-      Name: !Sub "${ProjectName}-${Environment}-build"
+      Name: !Sub "${ApplicationName}-${Environment}-build"
       ServiceRole: !Ref CodeBuildRoleArn
       Artifacts: { Type: CODEPIPELINE }
       Source:
@@ -91,16 +111,16 @@ Resources:
         EnvironmentVariables:
           - { Name: AWS_REGION, Value: !Ref AWS::Region }
           - { Name: AWS_ACCOUNT_ID, Value: !Ref AWS::AccountId }
-          - { Name: ECR_REPO_URI, Value: !GetAtt EcrRepo.RepositoryUri }
+          - { Name: ECR_REPO_URI, Value: !GetAtt ContainerRepository.RepositoryUri }
 
-  Pipeline:
+  CodePipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
-      Name: !Sub "${ProjectName}-${Environment}-pipeline"
+      Name: !Sub "${ApplicationName}-${Environment}-pipeline"
       RoleArn: !Ref CodePipelineRoleArn
       ArtifactStore:
         Type: S3
-        Location: !Ref ArtifactBucket
+        Location: !Ref CodePipelineArtifactBucket
       Stages:
         - Name: Source
           Actions:
@@ -111,7 +131,7 @@ Resources:
                 Provider: CodeCommit
                 Version: "1"
               Configuration:
-                RepositoryName: !GetAtt SourceRepo.Name
+                RepositoryName: !GetAtt CodeRepository.Name
                 BranchName: !Ref RepositoryBranch
                 PollForSourceChanges: "false"
               OutputArtifacts:
@@ -125,7 +145,7 @@ Resources:
                 Provider: CodeBuild
                 Version: "1"
               Configuration:
-                ProjectName: !Ref BuildProject
+                ProjectName: !Ref CodeBuild
               InputArtifacts:
                 - Name: SourceOutput
               OutputArtifacts:
@@ -133,11 +153,11 @@ Resources:
 
 Outputs:
   CodeCommitCloneUrlHttp:
-    Value: !GetAtt SourceRepo.CloneUrlHttp
+    Value: !GetAtt CodeRepository.CloneUrlHttp
   EcrRepositoryUri:
-    Description: Base ECR URI. Append the image tag (see imageDetail.json) and feed into Layer 4 as ContainerImageUri.
-    Value: !GetAtt EcrRepo.RepositoryUri
+    Description: Base ECR URI. Append the image tag (see imageDetail.json) for the runtime's ContainerImageUri.
+    Value: !GetAtt ContainerRepository.RepositoryUri
   ArtifactBucketName:
-    Value: !Ref ArtifactBucket
+    Value: !Ref CodePipelineArtifactBucket
   PipelineName:
-    Value: !Ref Pipeline
+    Value: !Ref CodePipeline
