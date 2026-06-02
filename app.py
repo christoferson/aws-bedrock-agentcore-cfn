@@ -18,7 +18,8 @@ app = BedrockAgentCoreApp()
 # Model id is supplied via the Runtime EnvironmentVariables (set in the
 # CloudFormation Layer 4 template) so the image stays environment-agnostic.
 MODEL_ID = os.environ.get(
-    "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0", 
+    #"us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 )
 SYSTEM_PROMPT = os.environ.get(
     "AGENT_SYSTEM_PROMPT",
