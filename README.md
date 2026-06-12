@@ -11,7 +11,7 @@ deployed in sequence.
 | 3 | `cloudformation/03-cicd.yaml` | CodeCommit, ECR, CodeBuild, CodePipeline |
 | 4 | `cloudformation/04-agentcore-runtime.yaml` | `AWS::BedrockAgentCore::Runtime` (VPC mode) |
 
-The agent lives in `src/` (`app.py`, `requirements.txt`, `Dockerfile`) and is
+The agent lives at the repo root (`app.py`, `requirements.txt`, `Dockerfile`) and is
 built into an ARM64 image by the pipeline. Stacks pass values to each other via
 **explicit parameters** (`params/<env>/*.json`).
 
