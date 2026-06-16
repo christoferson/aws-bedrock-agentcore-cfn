@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  [Gateway 01] Simplest possible AgentCore Gateway: no inbound authentication
+  (AuthorizerType: NONE), MCP protocol with default session and streaming settings,
+  and DEBUG exception level for easy troubleshooting.
+
+  Use this as a baseline to understand the resource structure before layering on
+  auth, interceptors, or policy engines in later templates.
+
+  Prerequisites: none — this template is self-contained.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+    Description: >
+      Prefix applied to all resource names. Keep the "bedrock-agentcore" prefix
+      so resource ARNs align with AWS-managed policy conditions that scope on it.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+    Description: Deployment environment tag; also used in resource names.
+
+  GatewayDescription:
+    Type: String
+    Default: "Demo gateway — no auth, MCP protocol"
+    Description: Human-readable description stored on the gateway resource (max 200 chars).
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+    Description: >
+      MCP session idle timeout in seconds.
+      Min 900 (15 min), max 28800 (8 hr), default 3600 (1 hr).
+      After expiry, further requests on that session return an error.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # IAM Role
+  # ---------------------------------------------------------------------------
+  # The gateway assumes this role to call downstream AWS services on behalf of
+  # tool invocations (e.g. invoke Lambda targets, write CloudWatch Logs).
+  #
+  # Trust principal: bedrock-agentcore.amazonaws.com
+  # The SourceAccount condition prevents confused-deputy attacks — only
+  # AgentCore resources in THIS account can assume the role.
+  # ---------------------------------------------------------------------------
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gateway-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-basic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudWatch Logs — gateway writes operational logs here.
+              # Scoped to the /aws/bedrock-agentcore/ log group prefix.
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # ---------------------------------------------------------------------------
+  # Gateway
+  # ---------------------------------------------------------------------------
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+
+      # Name must match ^([0-9a-zA-Z][-]?){1,100}$
+      # Changing this forces replacement of the resource.
+      Name: !Sub "${ApplicationName}-gw-${Environment}"
+
+      # RoleArn — the gateway assumes this role for downstream calls.
+      RoleArn: !GetAtt GatewayRole.Arn
+
+      # AuthorizerType controls how INBOUND requests to this gateway are
+      # authenticated. Allowed values:
+      #   NONE             — no authentication; any caller may invoke (dev/testing only)
+      #   AUTHENTICATE_ONLY — validates identity but does not enforce authorization
+      #   AWS_IAM          — requires SigV4-signed requests (see 02-gateway-iam-auth.yaml)
+      #   CUSTOM_JWT       — validates a Bearer JWT token (see 03-gateway-jwt-auth.yaml)
+      #
+      # AuthorizerConfiguration is only needed for CUSTOM_JWT.
+      AuthorizerType: NONE
+
+      # ExceptionLevel: DEBUG causes full stack traces and exception details to be
+      # included in error responses — very helpful during development.
+      # Omit this property (or remove it) in staging/production to avoid
+      # leaking internal details to callers.
+      ExceptionLevel: DEBUG
+
+      # ProtocolConfiguration selects the communication protocol.
+      # MCP (Model Context Protocol) is currently the only supported protocol.
+      # ProtocolType is paired with this but is currently optional/implicit.
+      ProtocolConfiguration:
+        Mcp:
+
+          # Instructions are returned in the MCP initialize handshake response.
+          # Agents read these to understand how to use this gateway's tools.
+          # Max 2048 characters.
+          Instructions: !Sub >
+            This is a demo AgentCore Gateway (${Environment} environment).
+            No tools are attached yet. Deploy gateway targets to expose tools here.
+
+          # SearchType: SEMANTIC enables embedding-based tool discovery so the
+          # agent only sees tools relevant to the current query rather than the
+          # full tool list. Omit if you want all tools returned every time.
+          # SearchType: SEMANTIC
+
+          # SessionConfiguration: controls stateful MCP session lifetime.
+          # Each MCP client that calls initialize gets a session; subsequent
+          # requests within the session retain context. After the timeout
+          # the session expires and must be re-initialized.
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+
+          # StreamingConfiguration: when EnableResponseStreaming is true,
+          # the gateway sends partial results via Server-Sent Events (SSE)
+          # as tools produce output, rather than buffering until completion.
+          # Set to true for long-running tool calls to improve perceived latency.
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+
+      Description: !Ref GatewayDescription
+
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+# ---------------------------------------------------------------------------
+# Outputs — feed these into CDK/scripts or pass to dependent stacks.
+# ---------------------------------------------------------------------------
+Outputs:
+
+  GatewayArn:
+    Description: Full ARN of the gateway (use for IAM policies targeting this gateway)
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Description: Short unique ID of the gateway (used in bedrock-agentcore API calls)
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Description: >
+      HTTPS endpoint MCP clients connect to. Format:
+      https://<id>.gateway.bedrock-agentcore.<region>.amazonaws.com/mcp
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Description: Lifecycle status of the gateway (CREATING | ACTIVE | FAILED | DELETING)
+    Value: !GetAtt Gateway.Status
+
+  GatewayRoleArn:
+    Description: ARN of the IAM role the gateway assumes for downstream calls
+    Value: !GetAtt GatewayRole.Arn
+
+  CreatedAt:
+    Description: ISO 8601 timestamp when the gateway was created
+    Value: !GetAtt Gateway.CreatedAt
