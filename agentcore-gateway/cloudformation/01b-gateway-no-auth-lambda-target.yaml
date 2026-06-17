@@ -1,0 +1,477 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  [Gateway 01b] AgentCore Gateway (no auth) + Lambda target.
+
+  Extends 01-gateway-no-auth.yaml with a concrete AWS::BedrockAgentCore::GatewayTarget
+  backed by a Lambda function. This makes the gateway immediately testable — you can
+  call the GatewayUrl and invoke real tools.
+
+  New concepts introduced:
+    - AWS::BedrockAgentCore::GatewayTarget resource
+    - TargetConfiguration.Mcp.Lambda (McpLambdaTargetConfiguration)
+    - ToolSchema.InlinePayload: array of ToolDefinition
+    - ToolDefinition: Name, Description, InputSchema, OutputSchema
+    - SchemaDefinition: Type, Properties, Required, Items, Description
+    - CredentialProviderConfigurations: GATEWAY_IAM_ROLE (gateway uses its own role to invoke Lambda)
+    - Dual permissions required: gateway role IAM policy + Lambda resource-based policy
+
+  Two demo tools are exposed:
+    - echo       : returns the input message unchanged
+    - add_numbers: returns the sum of two numbers
+
+  Architecture:
+    Caller → GatewayUrl (MCP) → Gateway (NONE auth)
+                                     → GatewayTarget (MCP/Lambda)
+                                           → ToolLambda
+                                               → returns MCP tool result
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+    Description: >
+      Prefix for all resource names. The "bedrock-agentcore" prefix aligns with
+      AWS-managed policy conditions that scope on it — keep it unless you also
+      update the IAM resource ARN patterns.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+    Description: MCP session idle timeout (seconds). Min 900, max 28800, default 3600.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Lambda execution role (for the tool Lambda itself)
+  # ---------------------------------------------------------------------------
+  ToolLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-tool-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      # AWSLambdaBasicExecutionRole grants logs:CreateLogGroup/Stream/PutLogEvents
+      # on /aws/lambda/* — everything the function needs to write CloudWatch logs.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # ---------------------------------------------------------------------------
+  # Tool Lambda function
+  # ---------------------------------------------------------------------------
+  # This is the actual tool implementation invoked by the gateway.
+  #
+  # MCP TOOL CALL EVENT (sent by the gateway to this Lambda):
+  # {
+  #   "method": "tools/call",
+  #   "params": {
+  #     "name": "<tool-name>",        # matches ToolDefinition.Name below
+  #     "arguments": { ... }          # matches ToolDefinition.InputSchema
+  #   }
+  # }
+  #
+  # MCP TOOL CALL RESPONSE (what this Lambda must return):
+  # {
+  #   "content": [
+  #     { "type": "text", "text": "<result string>" }
+  #   ],
+  #   "isError": false
+  # }
+  #
+  # The Lambda may also receive "tools/list" if the gateway queries for the
+  # tool list dynamically (in addition to the inline ToolSchema defined below).
+  # ---------------------------------------------------------------------------
+  ToolLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-tools-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ToolLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # ------------------------------------------------------------------
+          # Tool implementations
+          # ------------------------------------------------------------------
+
+          def tool_echo(arguments: dict) -> str:
+              """Return the input message unchanged."""
+              message = arguments.get("message", "")
+              return f"Echo: {message}"
+
+          def tool_add_numbers(arguments: dict) -> str:
+              """Add two numbers and return the result."""
+              a = arguments.get("a", 0)
+              b = arguments.get("b", 0)
+              total = a + b
+              return f"{a} + {b} = {total}"
+
+          # Map tool names (must match ToolDefinition.Name in the CFN template)
+          # to their handler functions.
+          TOOLS = {
+              "echo":        tool_echo,
+              "add_numbers": tool_add_numbers,
+          }
+
+          # ------------------------------------------------------------------
+          # MCP response helpers
+          # ------------------------------------------------------------------
+
+          def mcp_result(text: str) -> dict:
+              return {
+                  "content": [{"type": "text", "text": text}],
+                  "isError": False,
+              }
+
+          def mcp_error(text: str) -> dict:
+              return {
+                  "content": [{"type": "text", "text": text}],
+                  "isError": True,
+              }
+
+          # ------------------------------------------------------------------
+          # Lambda handler
+          # ------------------------------------------------------------------
+
+          def handler(event, context):
+              logger.info(json.dumps({"event": event}))
+
+              method = event.get("method", "")
+
+              # tools/list — return the list of tools this function handles.
+              # The gateway may call this even though the tool list is also
+              # declared inline in the ToolSchema CFN property.
+              if method == "tools/list":
+                  return {
+                      "tools": [
+                          {
+                              "name": "echo",
+                              "description": "Returns the input message unchanged.",
+                              "inputSchema": {
+                                  "type": "object",
+                                  "properties": {
+                                      "message": {
+                                          "type": "string",
+                                          "description": "The message to echo back.",
+                                      }
+                                  },
+                                  "required": ["message"],
+                              },
+                          },
+                          {
+                              "name": "add_numbers",
+                              "description": "Adds two numbers together and returns the sum.",
+                              "inputSchema": {
+                                  "type": "object",
+                                  "properties": {
+                                      "a": {"type": "number", "description": "First number."},
+                                      "b": {"type": "number", "description": "Second number."},
+                                  },
+                                  "required": ["a", "b"],
+                              },
+                          },
+                      ]
+                  }
+
+              # tools/call — dispatch to the matching tool function.
+              if method == "tools/call":
+                  params    = event.get("params", {})
+                  tool_name = params.get("name", "")
+                  arguments = params.get("arguments", {})
+
+                  tool_fn = TOOLS.get(tool_name)
+                  if tool_fn is None:
+                      return mcp_error(f"Unknown tool: {tool_name!r}. Available: {list(TOOLS)}")
+
+                  try:
+                      result = tool_fn(arguments)
+                      return mcp_result(result)
+                  except Exception as exc:
+                      logger.exception("Tool %s raised an exception", tool_name)
+                      return mcp_error(f"Tool {tool_name!r} failed: {exc}")
+
+              return mcp_error(f"Unsupported MCP method: {method!r}")
+
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # ---------------------------------------------------------------------------
+  # Lambda resource-based policy
+  # ---------------------------------------------------------------------------
+  # The bedrock-agentcore service must be allowed to invoke this function.
+  # Two permissions are needed (both are required — neither alone is sufficient):
+  #   1. The gateway ROLE must have lambda:InvokeFunction (granted below in GatewayRole).
+  #   2. The Lambda RESOURCE POLICY must allow the bedrock-agentcore principal.
+  # ---------------------------------------------------------------------------
+  ToolLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ToolLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      # SourceAccount prevents other accounts from using this permission
+      # to invoke your Lambda via their own gateway.
+      SourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------------
+  # Gateway execution role
+  # ---------------------------------------------------------------------------
+  # The gateway assumes this role for ALL outbound calls it makes:
+  # invoking Lambda targets, writing CloudWatch Logs, etc.
+  # ---------------------------------------------------------------------------
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              # Prevents cross-account confused-deputy attacks.
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+              # The gateway role must have lambda:InvokeFunction on the target
+              # Lambda. This is the IAM side of the dual-permission requirement.
+              # (The resource-based policy above is the other side.)
+              - Sid: InvokeToolLambda
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ToolLambda.Arn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # ---------------------------------------------------------------------------
+  # Gateway
+  # ---------------------------------------------------------------------------
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+
+      # No inbound authentication — any caller can invoke this gateway.
+      # Suitable for development/testing only.
+      AuthorizerType: NONE
+
+      # Full stack traces in error responses — useful while testing.
+      ExceptionLevel: DEBUG
+
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: >
+            Demo gateway with two tools: "echo" (returns your message) and
+            "add_numbers" (adds two numbers). No authentication required.
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+
+      Description: "Demo gateway — no auth, Lambda target with echo and add_numbers tools"
+
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # ---------------------------------------------------------------------------
+  # Gateway Target
+  # ---------------------------------------------------------------------------
+  # A GatewayTarget binds one backend (here: a Lambda function) to the gateway.
+  # Multiple targets can be attached to one gateway; each contributes its own
+  # set of tools to the MCP tool namespace.
+  #
+  # GatewayIdentifier links this target to the gateway above.
+  # Changing GatewayIdentifier forces replacement of the target resource.
+  # ---------------------------------------------------------------------------
+  GatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      Name: !Sub "${ApplicationName}-target-tools-${Environment}"
+      Description: "Lambda target exposing echo and add_numbers tools"
+
+      # GatewayIdentifier — the short ID of the parent gateway (not the ARN).
+      # Pattern: ^([0-9a-z][-]?){1,100}-[0-9a-z]{10}$
+      # Changing this forces replacement.
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+
+      # TargetConfiguration — selects the target type and its backend details.
+      # Options: Http (for HTTP endpoints) or Mcp (for MCP-aware backends).
+      # We use Mcp.Lambda here because our Lambda speaks the MCP tools/call protocol.
+      TargetConfiguration:
+        Mcp:
+
+          # Lambda — identifies the function and declares its tools to the gateway.
+          Lambda:
+            # LambdaArn — the function to invoke for tools/call and tools/list.
+            # Supports unqualified ARN (uses $LATEST) or versioned/aliased ARN.
+            LambdaArn: !GetAtt ToolLambda.Arn
+
+            # ToolSchema — tells the gateway what tools this Lambda provides.
+            # The gateway uses this schema to:
+            #   - Advertise tools to MCP clients (tools/list response)
+            #   - Validate tool call arguments before forwarding to Lambda
+            #   - Enable semantic search (when SearchType: SEMANTIC is set on the gateway)
+            #
+            # InlinePayload: define tools directly in the template (up to a reasonable size).
+            # S3: alternative — store the schema JSON in S3 for larger schemas.
+            ToolSchema:
+              InlinePayload:
+
+                # ---- Tool 1: echo ----
+                # Demonstrates a simple single-string-input tool.
+                - Name: echo
+                  Description: >
+                    Returns the input message unchanged. Use this to verify
+                    the gateway and Lambda target are working correctly.
+                  InputSchema:
+                    # SchemaDefinition mirrors JSON Schema but uses CFN native types.
+                    # Type is required; allowed values: string | number | object
+                    #   | array | boolean | integer
+                    Type: object
+                    Properties:
+                      # Each key under Properties is itself a SchemaDefinition.
+                      message:
+                        Type: string
+                        Description: "The message to echo back."
+                    Required:
+                      - message
+                  # OutputSchema is optional but helps agents understand what to expect.
+                  OutputSchema:
+                    Type: object
+                    Properties:
+                      result:
+                        Type: string
+                        Description: "The echoed message."
+
+                # ---- Tool 2: add_numbers ----
+                # Demonstrates a tool with multiple numeric inputs.
+                - Name: add_numbers
+                  Description: >
+                    Adds two numbers together and returns their sum.
+                    Demonstrates a tool with multiple numeric parameters.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      a:
+                        Type: number
+                        Description: "The first number."
+                      b:
+                        Type: number
+                        Description: "The second number."
+                    Required:
+                      - a
+                      - b
+                  OutputSchema:
+                    Type: object
+                    Properties:
+                      sum:
+                        Type: number
+                        Description: "The sum of a and b."
+
+      # CredentialProviderConfigurations — how the gateway authenticates when
+      # calling the target backend (outbound auth, distinct from inbound auth).
+      #
+      # GATEWAY_IAM_ROLE: the gateway uses its own execution role (GatewayRole above)
+      #   to sign the Lambda Invoke call with SigV4. This is the simplest option for
+      #   Lambda targets because the role already has lambda:InvokeFunction.
+      #
+      # Other options (for non-Lambda targets):
+      #   OAUTH              — gateway obtains an OAuth token to call the backend
+      #   API_KEY            — gateway sends a static API key header
+      #   CALLER_IAM_CREDENTIALS — gateway forwards the caller's own AWS credentials
+      #   JWT_PASSTHROUGH    — gateway forwards the caller's inbound JWT as-is
+      #
+      # Max 1 entry in this array.
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+Outputs:
+
+  GatewayArn:
+    Description: Full ARN of the gateway
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Description: Short unique ID (used in API calls and as GatewayIdentifier in targets)
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Description: >
+      MCP endpoint. Send MCP protocol messages here (no auth header needed).
+      Example initialize request:
+        POST <GatewayUrl>
+        Content-Type: application/json
+        { "method": "initialize", "params": { "protocolVersion": "2024-11-05",
+          "clientInfo": { "name": "test", "version": "1.0" },
+          "capabilities": {} } }
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Description: CREATING | ACTIVE | FAILED | DELETING
+    Value: !GetAtt Gateway.Status
+
+  GatewayTargetId:
+    Description: Unique ID of the gateway target
+    Value: !GetAtt GatewayTarget.TargetId
+
+  GatewayTargetStatus:
+    Description: Status of the gateway target
+    Value: !GetAtt GatewayTarget.Status
+
+  ToolLambdaArn:
+    Description: ARN of the tool Lambda function — invoke directly to test without gateway
+    Value: !GetAtt ToolLambda.Arn
+
+  ToolLambdaName:
+    Description: Name of the tool Lambda — use to tail logs in CloudWatch
+    Value: !Ref ToolLambda
+
+  QuickTestNote:
+    Description: >
+      Direct Lambda test payload (bypass gateway, test Lambda logic only):
+        aws lambda invoke --function-name <ToolLambdaName>
+          --payload '{"method":"tools/call","params":{"name":"echo","arguments":{"message":"hello"}}}'
+          --cli-binary-format raw-in-base64-out
+          response.json && cat response.json
+    Value: "See description"
