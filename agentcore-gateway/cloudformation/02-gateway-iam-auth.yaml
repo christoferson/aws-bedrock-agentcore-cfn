@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AgentCore Gateway with AWS_IAM authentication (SigV4), MCP protocol, and an example caller IAM role.
+
+# AuthorizerType: AWS_IAM — callers must sign requests with SigV4.
+# No AuthorizerConfiguration block needed; validation is handled by the control plane.
+# GatewayCallerRole shows the minimum bedrock-agentcore:InvokeGateway permission required.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+Resources:
+
+  # --- GatewayRole ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-iam-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-basic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-iam-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: AWS_IAM # no AuthorizerConfiguration required for AWS_IAM
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Gateway secured with AWS IAM. Callers must sign requests with SigV4."
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+      Description: "Demo gateway — AWS_IAM auth, MCP protocol"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- GatewayCallerRole ---
+  # Example role for any principal that needs to invoke this gateway.
+  # Attach to Lambda, ECS task, EC2 instance profile, etc.
+  GatewayCallerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-caller-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com # replace with your workload principal
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-gateway
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeThisGateway
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway # required action for AWS_IAM gateways
+                Resource: !GetAtt Gateway.GatewayArn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  GatewayCallerRoleArn:
+    Description: Attach to any workload that needs to invoke this gateway
+    Value: !GetAtt GatewayCallerRole.Arn
