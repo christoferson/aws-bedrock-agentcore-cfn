@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore WorkloadIdentity — inbound OAuth2 identity for an agent workload.
+
+# WorkloadIdentity is the inbound identity primitive: it represents the agent itself
+# and provides an OAuth2 callback URL for authorization-code flows.
+# AllowedResourceOauth2ReturnUrls: register your app's redirect URIs here.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  AllowedReturnUrl:
+    Type: String
+    Default: ""
+    Description: "Optional OAuth2 redirect URI to allow (leave blank to omit)."
+
+Conditions:
+  HasReturnUrl: !Not [!Equals [!Ref AllowedReturnUrl, ""]]
+
+Resources:
+
+  # --- WorkloadIdentity ---
+  # Name pattern: [A-Za-z0-9_.-]+, 3-255 chars; change forces replacement.
+  WorkloadIdentity:
+    Type: AWS::BedrockAgentCore::WorkloadIdentity
+    Properties:
+      Name: !Sub "${ApplicationName}-identity-${Environment}"
+      AllowedResourceOauth2ReturnUrls:
+        - !If [HasReturnUrl, !Ref AllowedReturnUrl, !Ref AWS::NoValue]
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  WorkloadIdentityArn:
+    Value: !GetAtt WorkloadIdentity.WorkloadIdentityArn
+
+  CreatedTime:
+    Value: !GetAtt WorkloadIdentity.CreatedTime
