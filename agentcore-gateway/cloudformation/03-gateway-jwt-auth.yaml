@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AgentCore Gateway with CUSTOM_JWT authentication, a Cognito User Pool and App Client as the OIDC provider, and MCP protocol.
+
+# AuthorizerType: CUSTOM_JWT — validates inbound Bearer tokens against the Cognito OIDC discovery URL.
+# Gateway checks: JWT signature (via JWKS), expiry, aud claim, scope claim.
+# Supply CognitoUserPoolId to reuse an existing pool; leave blank to create a new one.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+  CognitoUserPoolId:
+    Type: String
+    Default: ""
+    Description: Leave blank to create a new Cognito User Pool, or supply an existing pool ID.
+
+Conditions:
+  CreateCognitoPool: !Equals [!Ref CognitoUserPoolId, ""]
+
+Resources:
+
+  # --- GatewayRole ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-jwt-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-basic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- CognitoUserPool ---
+  # Issues JWTs; gateway fetches JWKS from the pool's discovery URL to verify signatures.
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Condition: CreateCognitoPool
+    Properties:
+      UserPoolName: !Sub "${ApplicationName}-pool-${Environment}"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- CognitoResourceServer ---
+  # Defines the OAuth2 scopes the gateway will validate. Scope format: <identifier>/<name>.
+  CognitoResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Condition: CreateCognitoPool
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      Identifier: !Sub "https://${ApplicationName}-gateway-${Environment}"
+      Name: !Sub "${ApplicationName}-gateway-${Environment}"
+      Scopes:
+        - ScopeName: invoke
+          ScopeDescription: "Permission to invoke the AgentCore Gateway"
+
+  # --- CognitoAppClient ---
+  # Machine-to-machine client; uses client_credentials grant (no user login).
+  CognitoAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: CreateCognitoPool
+    DependsOn: CognitoResourceServer
+    Properties:
+      ClientName: !Sub "${ApplicationName}-gw-client-${Environment}"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - !Sub "https://${ApplicationName}-gateway-${Environment}/invoke"
+      PreventUserExistenceErrors: ENABLED
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-jwt-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          # DiscoveryUrl must end with /.well-known/openid-configuration
+          DiscoveryUrl: !Sub
+            - "https://cognito-idp.${AWS::Region}.amazonaws.com/${PoolId}/.well-known/openid-configuration"
+            - PoolId: !If [CreateCognitoPool, !Ref CognitoUserPool, !Ref CognitoUserPoolId]
+          AllowedAudience:
+            - !Sub "https://${ApplicationName}-gateway-${Environment}" # must match JWT aud claim
+          AllowedClients:
+            - !If [CreateCognitoPool, !Ref CognitoAppClient, !Ref AWS::NoValue]
+          AllowedScopes:
+            - !Sub "https://${ApplicationName}-gateway-${Environment}/invoke"
+          # CustomClaims: omitted here — see 04-gateway-jwt-custom-claims.yaml
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Gateway secured with CUSTOM_JWT (Cognito). Pass a client_credentials Bearer token."
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+      Description: "Demo gateway — CUSTOM_JWT auth via Cognito, MCP protocol"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  CognitoTokenEndpoint:
+    Condition: CreateCognitoPool
+    Description: "POST grant_type=client_credentials + client_id + client_secret + scope here to get a JWT"
+    Value: !Sub "https://${ApplicationName}-pool-${Environment}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
+
+  CognitoUserPoolId:
+    Condition: CreateCognitoPool
+    Value: !Ref CognitoUserPool
+
+  CognitoAppClientId:
+    Condition: CreateCognitoPool
+    Value: !Ref CognitoAppClient
+
+  DiscoveryUrl:
+    Value: !Sub
+      - "https://cognito-idp.${AWS::Region}.amazonaws.com/${PoolId}/.well-known/openid-configuration"
+      - PoolId: !If [CreateCognitoPool, !Ref CognitoUserPool, !Ref CognitoUserPoolId]
