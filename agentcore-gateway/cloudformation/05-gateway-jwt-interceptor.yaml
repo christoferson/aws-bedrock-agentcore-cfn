@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AgentCore Gateway with CUSTOM_JWT authentication and a Lambda interceptor at configurable REQUEST and/or RESPONSE points.
+
+# Interceptors are invoked during every gateway call at the specified lifecycle point.
+# REQUEST: before the request is forwarded to the target tool.
+# RESPONSE: after the target tool has responded.
+# Interceptor Lambda: return the (optionally modified) request/response, or raise to reject.
+# Dual permissions: gateway role IAM policy + Lambda resource-based policy.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+  CognitoDiscoveryUrl:
+    Type: String
+    Description: "OIDC discovery URL ending in /.well-known/openid-configuration"
+
+  AllowedAudience:
+    Type: String
+
+  AllowedScope:
+    Type: String
+    Default: "gateway/invoke"
+
+  InterceptorMode:
+    Type: String
+    Default: REQUEST_ONLY
+    AllowedValues: [REQUEST_ONLY, RESPONSE_ONLY, BOTH]
+    Description: "REQUEST_ONLY | RESPONSE_ONLY | BOTH (max 2 interceptor entries per gateway)"
+
+Conditions:
+  IncludeRequest:  !Or [!Equals [!Ref InterceptorMode, REQUEST_ONLY],  !Equals [!Ref InterceptorMode, BOTH]]
+  IncludeResponse: !Or [!Equals [!Ref InterceptorMode, RESPONSE_ONLY], !Equals [!Ref InterceptorMode, BOTH]]
+
+Resources:
+
+  # --- InterceptorLambdaRole ---
+  InterceptorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-interceptor-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- InterceptorFunction ---
+  # Stub: logs the event and passes through unchanged. Replace with real logic.
+  # REQUEST event shape: { interceptionPoint, requestContext, request, headers? }
+  # RESPONSE event shape: { interceptionPoint, requestContext, response }
+  InterceptorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-interceptor-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt InterceptorLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json, logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              point = event.get("interceptionPoint", "UNKNOWN")
+              logger.info(json.dumps({"point": point,
+                                      "requestId": event.get("requestContext", {}).get("requestId", "-"),
+                                      "headerKeys": list(event.get("headers", {}).keys())}))
+              if point == "REQUEST":
+                  return event.get("request", {})   # return modified request to continue, raise to reject
+              if point == "RESPONSE":
+                  return event.get("response", {})  # return modified response
+              return event
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- InterceptorFunctionPermission ---
+  # Resource-based policy side of the dual-permission requirement.
+  InterceptorFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InterceptorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # --- GatewayRole ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-intercept-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-interceptor
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+              - Sid: InvokeInterceptorLambda # IAM side of the dual-permission requirement
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt InterceptorFunction.Arn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-intercept-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref CognitoDiscoveryUrl
+          AllowedAudience:
+            - !Ref AllowedAudience
+          AllowedScopes:
+            - !Ref AllowedScope
+      # InterceptorConfigurations: max 2 entries; each targets one lifecycle point.
+      InterceptorConfigurations:
+        - !If
+          - IncludeRequest
+          - InputConfiguration:
+              PassRequestHeaders: true # forward caller HTTP headers to the Lambda event
+            InterceptionPoints:
+              - REQUEST
+            Interceptor:
+              Lambda:
+                Arn: !GetAtt InterceptorFunction.Arn
+          - !Ref AWS::NoValue
+        - !If
+          - IncludeResponse
+          - InputConfiguration:
+              PassRequestHeaders: false
+            InterceptionPoints:
+              - RESPONSE
+            Interceptor:
+              Lambda:
+                Arn: !GetAtt InterceptorFunction.Arn
+          - !Ref AWS::NoValue
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Gateway with Lambda interceptor. Requests/responses pass through a Lambda before/after the tool."
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+      Description: "Demo gateway — CUSTOM_JWT + Lambda interceptor"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  InterceptorFunctionArn:
+    Value: !GetAtt InterceptorFunction.Arn
+
+  InterceptorFunctionName:
+    Value: !Ref InterceptorFunction
+
+  InterceptorMode:
+    Value: !Ref InterceptorMode

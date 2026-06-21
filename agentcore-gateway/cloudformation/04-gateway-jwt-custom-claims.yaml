@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AgentCore Gateway with CUSTOM_JWT authentication and custom JWT claim validation (EQUALS, CONTAINS, CONTAINS_ANY).
+
+# Extends 03 by adding CustomClaims rules. All claims are AND-ed; all must pass.
+# Three operators demonstrated:
+#   EQUALS        — scalar STRING claim must exactly match a value
+#   CONTAINS      — STRING_ARRAY claim must include a scalar value
+#   CONTAINS_ANY  — STRING_ARRAY claim must overlap with a list of values
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+  CognitoDiscoveryUrl:
+    Type: String
+    Description: "OIDC discovery URL ending in /.well-known/openid-configuration"
+
+  AllowedAudience:
+    Type: String
+    Description: JWT aud claim value.
+
+  AllowedScope:
+    Type: String
+    Default: "gateway/invoke"
+
+  RequiredTenantId:
+    Type: String
+    Default: "acme"
+    Description: JWT tenant_id claim must equal this value.
+
+  AllowedRoles:
+    Type: CommaDelimitedList
+    Default: "admin,developer"
+    Description: JWT roles claim (STRING_ARRAY) must contain at least one of these.
+
+Resources:
+
+  # --- GatewayRole ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-claims-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-basic
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-claims-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref CognitoDiscoveryUrl
+          AllowedAudience:
+            - !Ref AllowedAudience
+          AllowedScopes:
+            - !Ref AllowedScope
+          # CustomClaims: all entries are AND-ed; every rule must pass.
+          CustomClaims:
+            # EQUALS: JWT "tenant_id" (STRING) must exactly match RequiredTenantId.
+            - InboundTokenClaimName: tenant_id
+              InboundTokenClaimValueType: STRING
+              AuthorizingClaimMatchValue:
+                ClaimMatchOperator: EQUALS
+                ClaimMatchValue:
+                  MatchValueString: !Ref RequiredTenantId
+
+            # CONTAINS: JWT "department" (STRING_ARRAY) must include "engineering".
+            - InboundTokenClaimName: department
+              InboundTokenClaimValueType: STRING_ARRAY
+              AuthorizingClaimMatchValue:
+                ClaimMatchOperator: CONTAINS
+                ClaimMatchValue:
+                  MatchValueString: engineering
+
+            # CONTAINS_ANY: JWT "roles" (STRING_ARRAY) must overlap with AllowedRoles.
+            - InboundTokenClaimName: roles
+              InboundTokenClaimValueType: STRING_ARRAY
+              AuthorizingClaimMatchValue:
+                ClaimMatchOperator: CONTAINS_ANY
+                ClaimMatchValue:
+                  MatchValueStringList: !Ref AllowedRoles
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Gateway with custom claim validation. Token must carry tenant_id, department, and roles."
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+      Description: "Demo gateway — CUSTOM_JWT with custom claim checks"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  ClaimValidationSummary:
+    Value: !Sub "tenant_id==${RequiredTenantId} AND department contains 'engineering' AND roles intersects [${AllowedRoles}]"
