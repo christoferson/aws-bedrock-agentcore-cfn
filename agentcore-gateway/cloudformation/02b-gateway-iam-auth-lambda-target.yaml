@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Gateway with AWS_IAM auth, Lambda target, and a caller role.
+
+# Combines 02 (AWS_IAM auth) and 01b (Lambda target).
+# AuthorizerType: AWS_IAM — callers must sign requests with SigV4.
+# GatewayCallerRole: minimum bedrock-agentcore:InvokeGateway permission for any workload.
+# Dual-permission requirement for Lambda:
+#   (1) GatewayRole IAM policy: lambda:InvokeFunction on ToolLambda
+#   (2) ToolLambdaPermission resource-based policy: bedrock-agentcore.amazonaws.com principal
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+Resources:
+
+  # --- ToolLambdaRole ---
+  ToolLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-tool-lambda-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- ToolLambda ---
+  # Implements tools/list and tools/call for echo and add_numbers.
+  # Event: { "method": "tools/call", "params": { "name": "...", "arguments": {...} } }
+  # Response: { "content": [{ "type": "text", "text": "..." }], "isError": false }
+  ToolLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-tools-iam-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ToolLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json, logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def tool_echo(args):
+              return f"Echo: {args.get('message', '')}"
+
+          def tool_add_numbers(args):
+              a, b = args.get("a", 0), args.get("b", 0)
+              return f"{a} + {b} = {a + b}"
+
+          TOOLS = {"echo": tool_echo, "add_numbers": tool_add_numbers}
+
+          def mcp_result(text): return {"content": [{"type": "text", "text": text}], "isError": False}
+          def mcp_error(text):  return {"content": [{"type": "text", "text": text}], "isError": True}
+
+          def handler(event, context):
+              logger.info(json.dumps({"event": event}))
+              method = event.get("method", "")
+
+              if method == "tools/list":
+                  return {"tools": [
+                      {"name": "echo", "description": "Returns the input message unchanged.",
+                       "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}},
+                      {"name": "add_numbers", "description": "Adds two numbers and returns the sum.",
+                       "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"]}},
+                  ]}
+
+              if method == "tools/call":
+                  params = event.get("params", {})
+                  name   = params.get("name", "")
+                  fn     = TOOLS.get(name)
+                  if not fn:
+                      return mcp_error(f"Unknown tool: {name!r}")
+                  try:
+                      return mcp_result(fn(params.get("arguments", {})))
+                  except Exception as e:
+                      return mcp_error(f"Tool {name!r} failed: {e}")
+
+              return mcp_error(f"Unsupported method: {method!r}")
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- ToolLambdaPermission ---
+  # Resource-based policy side of the dual-permission requirement.
+  # Allows bedrock-agentcore service to invoke the function.
+  ToolLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ToolLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # --- GatewayRole ---
+  # Assumed by bedrock-agentcore. Grants CloudWatch Logs + IAM side of Lambda invoke.
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-iam-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-execution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+              - Sid: InvokeToolLambda # IAM side of the dual-permission requirement
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ToolLambda.Arn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-iam-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: AWS_IAM # callers sign requests with SigV4; no AuthorizerConfiguration needed
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Gateway secured with AWS IAM. Callers must sign requests with SigV4."
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+      Description: "Demo gateway — AWS_IAM auth, Lambda target with echo and add_numbers tools"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- GatewayTarget ---
+  GatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      Name: !Sub "${ApplicationName}-target-tools-iam-${Environment}"
+      Description: "Lambda target exposing echo and add_numbers tools"
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt ToolLambda.Arn
+            ToolSchema:
+              InlinePayload:
+                - Name: echo
+                  Description: "Returns the input message unchanged."
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      message:
+                        Type: string
+                        Description: "The message to echo back."
+                    Required:
+                      - message
+                  OutputSchema:
+                    Type: object
+                    Properties:
+                      result:
+                        Type: string
+
+                - Name: add_numbers
+                  Description: "Adds two numbers and returns their sum."
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      a:
+                        Type: number
+                        Description: "First number."
+                      b:
+                        Type: number
+                        Description: "Second number."
+                    Required:
+                      - a
+                      - b
+                  OutputSchema:
+                    Type: object
+                    Properties:
+                      sum:
+                        Type: number
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+  # --- GatewayCallerRole ---
+  # Attach to any workload (Lambda, ECS task, EC2 instance profile) that invokes the gateway.
+  # bedrock-agentcore:InvokeGateway is the required action for AWS_IAM gateways.
+  GatewayCallerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-caller-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com # replace with your workload principal
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-gateway
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeThisGateway
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway
+                Resource: !GetAtt Gateway.GatewayArn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  GatewayTargetId:
+    Value: !GetAtt GatewayTarget.TargetId
+
+  GatewayTargetStatus:
+    Value: !GetAtt GatewayTarget.Status
+
+  ToolLambdaArn:
+    Value: !GetAtt ToolLambda.Arn
+
+  GatewayCallerRoleArn:
+    Description: Attach to any workload that needs to invoke this gateway
+    Value: !GetAtt GatewayCallerRole.Arn
