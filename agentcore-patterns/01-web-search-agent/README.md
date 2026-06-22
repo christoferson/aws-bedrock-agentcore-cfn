@@ -24,13 +24,14 @@ Caller → AgentCore Runtime (VPC) → Agent (Strands + MCPClient)
 | # | Template | Creates |
 |---|----------|---------|
 | 1 | `01-iam.yaml` | ExecutionRole, GatewayRole, CodeBuildRole, CodePipelineRole |
-| 2 | `02-network.yaml` | VPC, public/private subnets (2 AZ), NAT gateway, runtime SG |
+| 2 | `02-network.yaml` | VPC, private subnets (2 AZ), VPC endpoints (no IGW, no NAT) |
 | 3 | `03-ecr-cicd.yaml` | ECR repo, S3 source bucket, CodeBuild (ARM64), CodePipeline |
 | 4 | `04-gateway.yaml` | Gateway (AWS_IAM) + WebSearch GatewayTarget |
 | 5 | `05-runtime.yaml` | AgentCore Runtime (VPC mode) with `GATEWAY_URL` env var |
+| 99 | `99-client.yaml` | Lambda test client — invoke the runtime from the console |
 
 **Hard ordering constraint:** Stack 5 requires an ARM64 image in ECR. Deploy stacks
-1–4 first, then push agent code (stack 3 pipeline builds the image), then deploy stack 5.
+1–4 first, then push agent code (stack 3 pipeline builds the image), then deploy stacks 5 and 99.
 
 ## Deploy
 
@@ -123,20 +124,45 @@ aws cloudformation deploy \
     GatewayUrl=<GATEWAY_URL>
 ```
 
-## Invoke
+### 7. Deploy client Lambda
 
 ```bash
 AGENT_ARN=$(aws cloudformation describe-stacks --stack-name web-search-agent-runtime \
   --query "Stacks[0].Outputs[?OutputKey=='AgentRuntimeArn'].OutputValue" --output text)
 
-./scripts/invoke.sh "$AGENT_ARN" "What are the latest developments in quantum computing?"
+aws cloudformation deploy \
+  --template-file cloudformation/99-client.yaml \
+  --stack-name web-search-agent-client \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    ApplicationName=bedrock-agentcore \
+    Environment=dev \
+    AgentRuntimeArn="$AGENT_ARN"
+```
+
+## Invoke
+
+From the Lambda console, open `bedrock-agentcore-dev-client` → **Test** → use this event:
+
+```json
+{ "prompt": "What are the latest developments in quantum computing?" }
+```
+
+Or via CLI:
+
+```bash
+aws lambda invoke \
+  --function-name bedrock-agentcore-dev-client \
+  --payload '{"prompt": "What are the latest developments in quantum computing?"}' \
+  --cli-binary-format raw-in-base64-out \
+  response.json && cat response.json
 ```
 
 ## Teardown
 
 Delete stacks in reverse order:
 ```bash
-for stack in web-search-agent-runtime web-search-agent-gateway web-search-agent-cicd web-search-agent-network web-search-agent-iam; do
+for stack in web-search-agent-client web-search-agent-runtime web-search-agent-gateway web-search-agent-cicd web-search-agent-network web-search-agent-iam; do
   aws cloudformation delete-stack --stack-name $stack
   aws cloudformation wait stack-delete-complete --stack-name $stack
 done

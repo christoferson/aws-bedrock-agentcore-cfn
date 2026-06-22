@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Lambda test client — invoke the web search agent runtime from the console
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  AgentRuntimeArn:
+    Type: String
+    Description: AgentRuntimeArn from stack 05-runtime
+
+Resources:
+
+  ClientRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-client-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: client-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeRuntime
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource: !Ref AgentRuntimeArn
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda runs outside the VPC — InvokeAgentRuntime is a public AWS API endpoint
+  ClientFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-${Environment}-client"
+      Description: Test client — invoke the web search agent runtime
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: index.handler
+      Role: !GetAtt ClientRole.Arn
+      Timeout: 120
+      Environment:
+        Variables:
+          AGENT_RUNTIME_ARN: !Ref AgentRuntimeArn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import uuid
+          import boto3
+
+          AGENT_RUNTIME_ARN = os.environ["AGENT_RUNTIME_ARN"]
+
+          client = boto3.client("bedrock-agentcore")
+
+          def handler(event, context):
+              prompt = event.get("prompt")
+              if not prompt:
+                  return {"statusCode": 400, "body": "Missing 'prompt' in event"}
+
+              session_id = event.get("sessionId", str(uuid.uuid4()))
+
+              resp = client.invoke_agent_runtime(
+                  agentRuntimeArn=AGENT_RUNTIME_ARN,
+                  runtimeSessionId=session_id,
+                  qualifier="DEFAULT",
+                  payload=json.dumps({"prompt": prompt}).encode(),
+              )
+
+              chunks = []
+              for chunk in resp.get("response", []):
+                  chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk)
+              raw = "".join(chunks)
+
+              try:
+                  result = json.loads(raw)
+              except Exception:
+                  result = {"raw": raw}
+
+              return {"statusCode": 200, "body": result, "sessionId": session_id}
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  ClientLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ClientFunction}"
+      RetentionInDays: 7
+
+Outputs:
+  ClientFunctionName:
+    Value: !Ref ClientFunction
+  ClientFunctionArn:
+    Value: !GetAtt ClientFunction.Arn

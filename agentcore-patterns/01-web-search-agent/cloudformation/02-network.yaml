@@ -57,7 +57,7 @@ Resources:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnet1Cidr
       AvailabilityZone: !Select [0, !GetAZs ""]
-      MapPublicIpOnLaunch: true
+      MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-public-1"
@@ -68,7 +68,7 @@ Resources:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnet2Cidr
       AvailabilityZone: !Select [1, !GetAZs ""]
-      MapPublicIpOnLaunch: true
+      MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-public-2"
@@ -166,11 +166,11 @@ Resources:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
 
-  # --- Runtime security group ---
+  # --- Runtime security group (no inbound; egress to internet via NAT) ---
   RuntimeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: AgentCore Runtime — allow HTTPS egress only
+      GroupDescription: Runtime egress via NAT
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - IpProtocol: tcp
