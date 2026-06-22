@@ -5,7 +5,10 @@ set -euo pipefail
 BUCKET="${1:?Usage: $0 <source-bucket-name>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENT_DIR="$SCRIPT_DIR/../agent"
-TMP_ZIP="/tmp/source.zip"
+TMP_DIR="$SCRIPT_DIR/../tmp"
+TMP_ZIP="$TMP_DIR/source.zip"
+
+mkdir -p "$TMP_DIR"
 
 echo "Packaging agent source..."
 (cd "$AGENT_DIR" && zip -r "$TMP_ZIP" . -x "*.pyc" -x "__pycache__/*" -x ".pytest_cache/*")
