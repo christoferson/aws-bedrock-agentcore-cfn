@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Runtime (VPC mode) — web search agent container
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  ExecutionRoleArn:
+    Type: String
+    Description: ExecutionRole ARN from stack 01-iam
+  PrivateSubnetList:
+    Type: CommaDelimitedList
+    Description: Private subnet IDs from stack 02-network
+  SecurityGroupList:
+    Type: CommaDelimitedList
+    Description: Runtime security group ID from stack 02-network
+  ContainerImageUri:
+    Type: String
+    Description: "ECR image URI with tag or digest, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:abc12345"
+    AllowedPattern: '^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9._/-]+(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$'
+  GatewayUrl:
+    Type: String
+    Description: GatewayUrl from stack 04-gateway
+  ModelId:
+    Type: String
+    Default: us.anthropic.claude-sonnet-4-6
+
+Resources:
+
+  Runtime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub "${ApplicationName}_${Environment}_web_search"
+      Description: !Sub "${ApplicationName} ${Environment} web search agent"
+      RoleArn: !Ref ExecutionRoleArn
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          ContainerUri: !Ref ContainerImageUri
+      NetworkConfiguration:
+        NetworkMode: VPC
+        NetworkModeConfig:
+          Subnets: !Ref PrivateSubnetList
+          SecurityGroups: !Ref SecurityGroupList
+      EnvironmentVariables:
+        GATEWAY_URL: !Ref GatewayUrl
+        MODEL_ID: !Ref ModelId
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+Outputs:
+  AgentRuntimeArn:
+    Value: !GetAtt Runtime.AgentRuntimeArn
+  AgentRuntimeId:
+    Value: !GetAtt Runtime.AgentRuntimeId

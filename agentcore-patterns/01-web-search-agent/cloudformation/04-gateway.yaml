@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Gateway (AWS_IAM) with web-search connector target
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  GatewayRoleArn:
+    Type: String
+    Description: GatewayRole ARN from stack 01-iam
+
+Resources:
+
+  # --- Gateway (AWS_IAM — callers must sign requests with SigV4) ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-gateway"
+      RoleArn: !Ref GatewayRoleArn
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      Description: !Sub "${ApplicationName} ${Environment} web search gateway"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- Web search connector target ---
+  WebSearchTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: web-search
+      Description: Amazon web search (us-east-1 only; $7/1000 queries)
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            Source:
+              ConnectorId: web-search
+            Configurations:
+              - Name: WebSearch
+                ParameterValues: {}
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
