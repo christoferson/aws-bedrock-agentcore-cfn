@@ -4,7 +4,7 @@ Description: IAM roles — ExecutionRole, GatewayRole, CodeBuildRole, CodePipeli
 Parameters:
   ApplicationName:
     Type: String
-    Default: bedrock-agentcore
+    Default: coreagent
   Environment:
     Type: String
     Default: dev

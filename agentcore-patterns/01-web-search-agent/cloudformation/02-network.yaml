@@ -4,7 +4,7 @@ Description: VPC, public/private subnets, NAT gateway, runtime security group
 Parameters:
   ApplicationName:
     Type: String
-    Default: bedrock-agentcore
+    Default: coreagent
   Environment:
     Type: String
     Default: dev

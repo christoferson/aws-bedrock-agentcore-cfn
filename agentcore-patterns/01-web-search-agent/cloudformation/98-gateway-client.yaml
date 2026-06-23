@@ -4,7 +4,7 @@ Description: Lambda test client for the AgentCore Gateway (MCP over HTTPS, AWS_I
 Parameters:
   ApplicationName:
     Type: String
-    Default: bedrock-agentcore
+    Default: coreagent
   Environment:
     Type: String
     Default: dev
@@ -126,8 +126,10 @@ Resources:
 
               return {"statusCode": 200, "body": result}
       Tags:
-        Application: !Ref ApplicationName
-        Environment: !Ref Environment
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
 
   GatewayClientLogGroup:
     Type: AWS::Logs::LogGroup

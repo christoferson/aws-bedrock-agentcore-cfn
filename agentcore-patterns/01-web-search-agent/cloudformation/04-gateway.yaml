@@ -4,7 +4,7 @@ Description: AgentCore Gateway (AWS_IAM) with web-search connector target
 Parameters:
   ApplicationName:
     Type: String
-    Default: bedrock-agentcore
+    Default: coreagent
   Environment:
     Type: String
     Default: dev

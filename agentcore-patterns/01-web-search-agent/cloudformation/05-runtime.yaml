@@ -4,7 +4,7 @@ Description: AgentCore Runtime (VPC mode) — web search agent container
 Parameters:
   ApplicationName:
     Type: String
-    Default: bedrock-agentcore
+    Default: coreagent
   Environment:
     Type: String
     Default: dev
@@ -27,7 +27,7 @@ Parameters:
     Description: GatewayUrl from stack 04-gateway
   ModelId:
     Type: String
-    Default: us.anthropic.claude-sonnet-4-6
+    Default: global.anthropic.claude-sonnet-4-6
 
 Resources:
 
