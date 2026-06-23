@@ -1,0 +1,310 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AgentCore Gateway with CUSTOM_JWT auth, custom claim checks, Lambda interceptors, Cedar policy engine, and a customer-managed KMS key.
+
+# Combines all features from templates 01-06 in one deployable stack.
+# KMS key policy grants bedrock-agentcore encrypt/decrypt via kms:ViaService condition.
+# ExceptionLevel: DEBUG controlled by EnableDebugExceptions parameter (off by default).
+# SearchType: SEMANTIC controlled by EnableSemanticSearch parameter.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+  CognitoDiscoveryUrl:
+    Type: String
+    Description: "OIDC discovery URL ending in /.well-known/openid-configuration"
+
+  AllowedAudience:
+    Type: String
+
+  AllowedScope:
+    Type: String
+    Default: "gateway/invoke"
+
+  RequiredTenantId:
+    Type: String
+    Default: "acme"
+    Description: JWT tenant_id claim must equal this value.
+
+  PolicyEngineArn:
+    Type: String
+    Description: "ARN of an existing BedrockAgentCore Policy Engine"
+    AllowedPattern: "^arn:[a-z0-9-]{1,20}:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:policy-engine/[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9_]{10}$"
+
+  PolicyEngineMode:
+    Type: String
+    Default: LOG_ONLY
+    AllowedValues: [LOG_ONLY, ENFORCE]
+
+  EnableSemanticSearch:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+  EnableResponseStreaming:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+  EnableDebugExceptions:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  IsDebug:           !Equals [!Ref EnableDebugExceptions, "true"]
+  UseSemanticSearch: !Equals [!Ref EnableSemanticSearch, "true"]
+  IsStreamingEnabled: !Equals [!Ref EnableResponseStreaming, "true"]
+
+Resources:
+
+  # --- GatewayKmsKey ---
+  # CMK for gateway data encryption at rest.
+  # AllowRootAdmin: full key management for the account root.
+  # AllowAgentCoreEncrypt: encrypt/decrypt scoped via kms:ViaService to this region's AgentCore.
+  GatewayKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for AgentCore Gateway ${ApplicationName}-${Environment}"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowRootAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowAgentCoreEncrypt
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+                kms:ViaService: !Sub "bedrock-agentcore.${AWS::Region}.amazonaws.com"
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  GatewayKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationName}-gateway-${Environment}"
+      TargetKeyId: !Ref GatewayKmsKey
+
+  # --- InterceptorLambdaRole ---
+  InterceptorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-interceptor-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- InterceptorFunction ---
+  # Stub: logs and passes through. Replace with real logic.
+  InterceptorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-interceptor-${Environment}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt InterceptorLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json, logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def handler(event, context):
+              point = event.get("interceptionPoint", "UNKNOWN")
+              logger.info(json.dumps({"point": point,
+                                      "requestId": event.get("requestContext", {}).get("requestId", "-")}))
+              if point == "REQUEST":
+                  return event.get("request", {})
+              if point == "RESPONSE":
+                  return event.get("response", {})
+              return event
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- InterceptorFunctionPermission ---
+  InterceptorFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InterceptorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # --- GatewayRole ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-full-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-full
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+              - Sid: InvokeInterceptorLambda
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt InterceptorFunction.Arn
+              - Sid: QueryPolicyEngine
+                Effect: Allow
+                Action: bedrock-agentcore:IsAuthorized
+                Resource: !Ref PolicyEngineArn
+              - Sid: UseKmsKey
+                Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt GatewayKmsKey.Arn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-full-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref CognitoDiscoveryUrl
+          AllowedAudience:
+            - !Ref AllowedAudience
+          AllowedScopes:
+            - !Ref AllowedScope
+          CustomClaims:
+            - InboundTokenClaimName: tenant_id # STRING EQUALS
+              InboundTokenClaimValueType: STRING
+              AuthorizingClaimMatchValue:
+                ClaimMatchOperator: EQUALS
+                ClaimMatchValue:
+                  MatchValueString: !Ref RequiredTenantId
+      InterceptorConfigurations:
+        - InputConfiguration:
+            PassRequestHeaders: true
+          InterceptionPoints:
+            - REQUEST
+          Interceptor:
+            Lambda:
+              Arn: !GetAtt InterceptorFunction.Arn
+        - InputConfiguration:
+            PassRequestHeaders: false
+          InterceptionPoints:
+            - RESPONSE
+          Interceptor:
+            Lambda:
+              Arn: !GetAtt InterceptorFunction.Arn
+      PolicyEngineConfiguration:
+        Arn: !Ref PolicyEngineArn
+        Mode: !Ref PolicyEngineMode
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Full-featured gateway: JWT auth, custom claims, interceptors, Cedar policy engine, KMS."
+          SearchType: !If [UseSemanticSearch, SEMANTIC, !Ref AWS::NoValue]
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: !If [IsStreamingEnabled, true, false]
+      KmsKeyArn: !GetAtt GatewayKmsKey.Arn
+      ExceptionLevel: !If [IsDebug, DEBUG, !Ref AWS::NoValue]
+      Description: !Sub "Full-featured gateway — ${Environment} — policy engine ${PolicyEngineMode}"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+        PolicyEngineMode: !Ref PolicyEngineMode
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  CreatedAt:
+    Value: !GetAtt Gateway.CreatedAt
+
+  UpdatedAt:
+    Value: !GetAtt Gateway.UpdatedAt
+
+  KmsKeyArn:
+    Value: !GetAtt GatewayKmsKey.Arn
+
+  KmsKeyAlias:
+    Value: !Ref GatewayKmsKeyAlias
+
+  InterceptorFunctionArn:
+    Value: !GetAtt InterceptorFunction.Arn
+
+  PolicyEngineMode:
+    Value: !Ref PolicyEngineMode
+
+  FeatureSummary:
+    Value: !Sub >
+      Auth=CUSTOM_JWT | TenantClaim=tenant_id==${RequiredTenantId} |
+      Interceptors=REQUEST+RESPONSE | PolicyEngine=${PolicyEngineMode} |
+      SemanticSearch=${EnableSemanticSearch} | Streaming=${EnableResponseStreaming} |
+      KMS=CustomerManaged | Debug=${EnableDebugExceptions}

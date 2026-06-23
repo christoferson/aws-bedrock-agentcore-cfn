@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AgentCore Gateway with CUSTOM_JWT authentication and a Cedar policy engine for per-tool-call authorization.
+
+# PolicyEngineConfiguration references an existing BedrockAgentCore PolicyEngine (created separately).
+# Mode LOG_ONLY: evaluate policies and trace verdicts without blocking.
+# Mode ENFORCE: denied tool calls return HTTP 403. Migrate from LOG_ONLY after validating.
+# Gateway role needs bedrock-agentcore:IsAuthorized on the policy engine ARN.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  SessionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    MinValue: 900
+    MaxValue: 28800
+
+  CognitoDiscoveryUrl:
+    Type: String
+    Description: "OIDC discovery URL ending in /.well-known/openid-configuration"
+
+  AllowedAudience:
+    Type: String
+
+  AllowedScope:
+    Type: String
+    Default: "gateway/invoke"
+
+  PolicyEngineArn:
+    Type: String
+    Description: "ARN of an existing BedrockAgentCore Policy Engine"
+    AllowedPattern: "^arn:[a-z0-9-]{1,20}:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:policy-engine/[a-zA-Z][a-zA-Z0-9-_]{0,99}-[a-zA-Z0-9_]{10}$"
+
+  PolicyEngineMode:
+    Type: String
+    Default: LOG_ONLY
+    AllowedValues: [LOG_ONLY, ENFORCE]
+    Description: "LOG_ONLY: trace only. ENFORCE: block denied tool calls with 403."
+
+Resources:
+
+  # --- GatewayRole ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-gw-pe-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAgentCoreAssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-policy-engine
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+              - Sid: QueryPolicyEngine # called once per tool invocation to get allow/deny verdict
+                Effect: Allow
+                Action: bedrock-agentcore:IsAuthorized
+                Resource: !Ref PolicyEngineArn
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- Gateway ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-gw-pe-${Environment}"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref CognitoDiscoveryUrl
+          AllowedAudience:
+            - !Ref AllowedAudience
+          AllowedScopes:
+            - !Ref AllowedScope
+      PolicyEngineConfiguration:
+        Arn: !Ref PolicyEngineArn
+        Mode: !Ref PolicyEngineMode # LOG_ONLY | ENFORCE
+      ProtocolConfiguration:
+        Mcp:
+          Instructions: "Gateway with Cedar policy engine. Tool calls are evaluated before forwarding."
+          SessionConfiguration:
+            SessionTimeoutInSeconds: !Ref SessionTimeoutSeconds
+          StreamingConfiguration:
+            EnableResponseStreaming: false
+      Description: !Sub "Demo gateway — CUSTOM_JWT + Policy Engine (${PolicyEngineMode})"
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+        PolicyEngineMode: !Ref PolicyEngineMode
+
+Outputs:
+
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+
+  GatewayIdentifier:
+    Value: !GetAtt Gateway.GatewayIdentifier
+
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+
+  GatewayStatus:
+    Value: !GetAtt Gateway.Status
+
+  PolicyEngineArn:
+    Value: !Ref PolicyEngineArn
+
+  PolicyEngineMode:
+    Value: !Ref PolicyEngineMode
