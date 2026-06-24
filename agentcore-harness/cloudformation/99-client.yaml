@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Lambda test client for AgentCore Harness
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  HarnessArn:
+    Type: String
+    Description: HarnessArn from stack 02-harness
+
+Resources:
+
+  ClientRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-harness-client-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: harness-client-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeHarness
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource: !Ref HarnessArn
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  ClientFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-${Environment}-harness-client"
+      Description: Test client for the AgentCore Harness
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: index.handler
+      Role: !GetAtt ClientRole.Arn
+      Timeout: 120
+      Environment:
+        Variables:
+          HARNESS_ARN: !Ref HarnessArn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import uuid
+          import boto3
+
+          HARNESS_ARN = os.environ["HARNESS_ARN"]
+          client = boto3.client("bedrock-agentcore")
+
+          def handler(event, context):
+              prompt = event.get("prompt")
+              if not prompt:
+                  return {"statusCode": 400, "body": "Missing 'prompt' in event"}
+
+              session_id = event.get("sessionId", str(uuid.uuid4()))
+
+              resp = client.invoke_agent_runtime(
+                  agentRuntimeArn=HARNESS_ARN,
+                  runtimeSessionId=session_id,
+                  qualifier="DEFAULT",
+                  payload=json.dumps({"prompt": prompt}).encode(),
+              )
+
+              chunks = []
+              for chunk in resp.get("response", []):
+                  chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk)
+              raw = "".join(chunks)
+
+              try:
+                  result = json.loads(raw)
+              except Exception:
+                  result = {"raw": raw}
+
+              return {"statusCode": 200, "body": result, "sessionId": session_id}
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  ClientLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ClientFunction}"
+      RetentionInDays: 7
+
+Outputs:
+  ClientFunctionName:
+    Value: !Ref ClientFunction
+  ClientFunctionArn:
+    Value: !GetAtt ClientFunction.Arn

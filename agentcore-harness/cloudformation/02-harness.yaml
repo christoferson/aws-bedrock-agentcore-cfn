@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Harness — managed agent loop with web search via Gateway
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  HarnessExecutionRoleArn:
+    Type: String
+    Description: HarnessExecutionRoleArn from stack 01-iam
+  GatewayArn:
+    Type: String
+    Description: GatewayArn of an existing AgentCore Gateway (optional)
+    Default: ""
+  ModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  MaxIterations:
+    Type: Number
+    Default: 10
+  TimeoutSeconds:
+    Type: Number
+    Default: 300
+
+Conditions:
+  HasGateway: !Not [!Equals [!Ref GatewayArn, ""]]
+
+Resources:
+
+  # --- Harness without gateway tool ---
+  HarnessNoGateway:
+    Type: AWS::BedrockAgentCore::Harness
+    Condition: !Not
+      - !Condition HasGateway
+    Properties:
+      HarnessName: !Sub "${ApplicationName}_${Environment}_harness"
+      ExecutionRoleArn: !Ref HarnessExecutionRoleArn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref ModelId
+          ApiFormat: converse_stream
+      SystemPrompt:
+        - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment."
+      MaxIterations: !Ref MaxIterations
+      TimeoutSeconds: !Ref TimeoutSeconds
+      Truncation:
+        Strategy: sliding_window
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Harness with AgentCore Gateway tool ---
+  HarnessWithGateway:
+    Type: AWS::BedrockAgentCore::Harness
+    Condition: HasGateway
+    Properties:
+      HarnessName: !Sub "${ApplicationName}_${Environment}_harness"
+      ExecutionRoleArn: !Ref HarnessExecutionRoleArn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref ModelId
+          ApiFormat: converse_stream
+      SystemPrompt:
+        - Text: !Sub "You are a helpful research assistant deployed by ${ApplicationName} in the ${Environment} environment. Use the available tools to find current information."
+      Tools:
+        - Type: agentcore_gateway
+          Name: web-search-gateway
+          Config:
+            AgentCoreGateway:
+              GatewayArn: !Ref GatewayArn
+      MaxIterations: !Ref MaxIterations
+      TimeoutSeconds: !Ref TimeoutSeconds
+      Truncation:
+        Strategy: sliding_window
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  HarnessArn:
+    Value: !If
+      - HasGateway
+      - !GetAtt HarnessWithGateway.Arn
+      - !GetAtt HarnessNoGateway.Arn
+  HarnessId:
+    Value: !If
+      - HasGateway
+      - !GetAtt HarnessWithGateway.HarnessId
+      - !GetAtt HarnessNoGateway.HarnessId
+  RuntimeArn:
+    Value: !If
+      - HasGateway
+      - !GetAtt HarnessWithGateway.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
+      - !GetAtt HarnessNoGateway.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
