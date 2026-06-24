@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore ApiKeyCredentialProvider backed by an external Secrets Manager secret.
+
+# EXTERNAL source: you own the secret and its rotation schedule.
+# ApiKeySecretConfig points to an existing Secrets Manager secret ARN and the JSON key.
+# The CFN stack creates the secret so the provider can reference it by ARN.
+# Replace the secret value after stack creation (NoEcho param keeps it out of CFN events).
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  ApiKeyValue:
+    Type: String
+    NoEcho: true
+    Description: "Initial API key value stored in Secrets Manager."
+
+  SecretJsonKey:
+    Type: String
+    Default: apiKey
+    Description: "JSON key inside the secret that holds the API key value."
+
+Resources:
+
+  # --- ApiKeySecret ---
+  # Owned by the operator; rotation and lifecycle are the operator's responsibility.
+  ApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ApplicationName}-apikey-secret-${Environment}"
+      SecretString: !Sub '{"${SecretJsonKey}": "${ApiKeyValue}"}'
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- ApiKeyProvider ---
+  # ApiKeySecretSource: EXTERNAL — service reads but does not manage the secret.
+  ApiKeyProvider:
+    Type: AWS::BedrockAgentCore::ApiKeyCredentialProvider
+    Properties:
+      Name: !Sub "${ApplicationName}-apikey-ext-${Environment}"
+      ApiKeySecretSource: EXTERNAL
+      ApiKeySecretConfig:
+        SecretId: !Ref ApiKeySecret # ARN of the Secrets Manager secret
+        JsonKey: !Ref SecretJsonKey  # key within the secret JSON
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  ApiKeyProviderArn:
+    Value: !GetAtt ApiKeyProvider.CredentialProviderArn
+
+  SecretArn:
+    Value: !Ref ApiKeySecret

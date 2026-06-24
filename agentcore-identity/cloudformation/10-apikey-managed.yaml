@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore WorkloadIdentity and ApiKeyCredentialProvider (MANAGED secret).
+
+# Adds an outbound API-key credential to the WorkloadIdentity from 01.
+# MANAGED source: supply ApiKey inline; AgentCore stores it in Secrets Manager.
+# EXTERNAL source: see 02b or supply ApiKeySecretConfig pointing to your own secret.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  ApiKeyValue:
+    Type: String
+    NoEcho: true
+    Description: "Raw API key value — stored in AgentCore-managed Secrets Manager secret."
+
+Resources:
+
+  # --- WorkloadIdentity ---
+  WorkloadIdentity:
+    Type: AWS::BedrockAgentCore::WorkloadIdentity
+    Properties:
+      Name: !Sub "${ApplicationName}-identity-${Environment}"
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+  # --- ApiKeyProvider ---
+  # ApiKeySecretSource: MANAGED — service creates + rotates the Secrets Manager secret.
+  # ApiKeySecretJsonKey (GetAtt) tells callers which JSON key holds the key inside the secret.
+  ApiKeyProvider:
+    Type: AWS::BedrockAgentCore::ApiKeyCredentialProvider
+    Properties:
+      Name: !Sub "${ApplicationName}-apikey-${Environment}"
+      ApiKey: !Ref ApiKeyValue
+      ApiKeySecretSource: MANAGED
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  WorkloadIdentityArn:
+    Value: !GetAtt WorkloadIdentity.WorkloadIdentityArn
+
+  ApiKeyProviderArn:
+    Value: !GetAtt ApiKeyProvider.CredentialProviderArn
+
+  ApiKeySecretJsonKey:
+    Value: !GetAtt ApiKeyProvider.ApiKeySecretJsonKey
