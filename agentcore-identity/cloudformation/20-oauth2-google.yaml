@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore OAuth2CredentialProvider for Google (built-in vendor, MANAGED secret).
+
+# GoogleOauth2 is a built-in vendor — no OauthDiscovery needed; endpoints are pre-configured.
+# ClientSecretSource: MANAGED — supply ClientSecret inline; service stores it.
+# After stack creation: register the CallbackUrl output in your Google OAuth2 app.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  GoogleClientId:
+    Type: String
+    Description: "OAuth2 client ID from Google Cloud Console."
+
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Description: "OAuth2 client secret from Google Cloud Console."
+
+Resources:
+
+  # --- GoogleOAuthProvider ---
+  # CredentialProviderVendor: change forces replacement.
+  # CallbackUrl (GetAtt): register this in Google Cloud Console → Authorized redirect URIs.
+  GoogleOAuthProvider:
+    Type: AWS::BedrockAgentCore::OAuth2CredentialProvider
+    Properties:
+      Name: !Sub "${ApplicationName}-google-oauth-${Environment}"
+      CredentialProviderVendor: GoogleOauth2 # change forces replacement
+      Oauth2ProviderConfigInput:
+        GoogleOauth2ProviderConfig:
+          ClientId: !Ref GoogleClientId
+          ClientSecret: !Ref GoogleClientSecret
+          ClientSecretSource: MANAGED # MANAGED | EXTERNAL
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  CredentialProviderArn:
+    Value: !GetAtt GoogleOAuthProvider.CredentialProviderArn
+
+  CallbackUrl:
+    Description: "Register this URL as an authorized redirect URI in Google Cloud Console."
+    Value: !GetAtt GoogleOAuthProvider.CallbackUrl
+
+  ClientSecretJsonKey:
+    Value: !GetAtt GoogleOAuthProvider.ClientSecretJsonKey

@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore OAuth2CredentialProvider for GitHub, with an external Secrets Manager secret.
+
+# GithubOauth2 is a built-in vendor using IncludedOauth2ProviderConfigInput.
+# ClientSecretSource: EXTERNAL — you manage the secret; supply SecretId + JsonKey.
+# After stack creation: register the CallbackUrl output as a GitHub OAuth app callback URL.
+
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: bedrock-agentcore
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+  GitHubClientId:
+    Type: String
+    Description: "Client ID from your GitHub OAuth App."
+
+  GitHubClientSecretArn:
+    Type: String
+    Description: "ARN of the Secrets Manager secret containing the GitHub client secret."
+
+  GitHubClientSecretJsonKey:
+    Type: String
+    Default: clientSecret
+    Description: "JSON key inside the secret that holds the client secret."
+
+Resources:
+
+  # --- GitHubOAuthProvider ---
+  # IncludedOauth2ProviderConfig is the generic built-in vendor config type.
+  # Vendor-specific sub-config types (e.g. GoogleOauth2ProviderConfig) are shorthand;
+  # IncludedOauth2ProviderConfig is the underlying structure for other built-in vendors.
+  GitHubOAuthProvider:
+    Type: AWS::BedrockAgentCore::OAuth2CredentialProvider
+    Properties:
+      Name: !Sub "${ApplicationName}-github-oauth-${Environment}"
+      CredentialProviderVendor: GithubOauth2 # change forces replacement
+      Oauth2ProviderConfigInput:
+        IncludedOauth2ProviderConfig:
+          ClientId: !Ref GitHubClientId # required for IncludedOauth2ProviderConfigInput
+          ClientSecretSource: EXTERNAL
+          ClientSecretConfig:
+            SecretId: !Ref GitHubClientSecretArn  # Secrets Manager secret ARN
+            JsonKey: !Ref GitHubClientSecretJsonKey
+      Tags:
+        - { Key: Application, Value: !Ref ApplicationName }
+        - { Key: Environment, Value: !Ref Environment }
+
+Outputs:
+
+  CredentialProviderArn:
+    Value: !GetAtt GitHubOAuthProvider.CredentialProviderArn
+
+  CallbackUrl:
+    Description: "Register this URL as the GitHub OAuth App Authorization callback URL."
+    Value: !GetAtt GitHubOAuthProvider.CallbackUrl
