@@ -1,0 +1,93 @@
+# 03-harness-with-tools-builtin-webbrowser — built-in AgentCore Browser. No custom container or browser resource needed.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Harness with built-in agentcore_browser tool
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - HarnessExecutionRoleArn
+      - Label:
+          default: Agent configuration
+        Parameters:
+          - ModelId
+          - MaxIterations
+          - TimeoutSeconds
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      HarnessExecutionRoleArn:
+        default: Harness execution role ARN (01-iam output)
+      ModelId:
+        default: Bedrock model ID
+      MaxIterations:
+        default: Max agent loop iterations per invocation
+      TimeoutSeconds:
+        default: Max duration per invocation (seconds)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  HarnessExecutionRoleArn:
+    Type: String
+    Description: HarnessExecutionRoleArn from stack 01-iam
+  ModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  MaxIterations:
+    Type: Number
+    Default: 10
+  TimeoutSeconds:
+    Type: Number
+    Default: 300
+
+Resources:
+
+  # --- Harness with the built-in AgentCore Browser tool ---
+  Harness:
+    Type: AWS::BedrockAgentCore::Harness
+    Properties:
+      HarnessName: !Sub "${ApplicationName}_${Environment}_browser"  # HarnessName forces replacement on change
+      ExecutionRoleArn: !Ref HarnessExecutionRoleArn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref ModelId
+          ApiFormat: converse_stream  # streaming converse API; preferred for low-latency responses
+      SystemPrompt:
+        - Text: !Sub "You are a helpful research assistant deployed by ${ApplicationName} in the ${Environment} environment. You can browse the web to find current information."
+      Tools:
+        - Type: agentcore_browser
+          Name: browser
+          Config:
+            AgentCoreBrowser: {}  # BrowserArn omitted — service uses the built-in aws.browser.v1 automatically
+      MaxIterations: !Ref MaxIterations
+      TimeoutSeconds: !Ref TimeoutSeconds
+      Truncation:
+        Strategy: sliding_window  # drops oldest messages when context limit is approached
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  HarnessArn:
+    Value: !GetAtt Harness.Arn
+  HarnessId:
+    Value: !GetAtt Harness.HarnessId
+  RuntimeArn:
+    Value: !GetAtt Harness.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
