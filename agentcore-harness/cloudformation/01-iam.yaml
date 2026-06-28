@@ -106,6 +106,20 @@ Resources:
                   - bedrock-agentcore:ListMemoryExtractionJobs
                   - bedrock-agentcore:GetMemory
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/*"
+
+              # Browser sessions — required when agentcore_browser tool is used.
+              # ConnectBrowser* actions have no resource type in IAM; must be *.
+              # Source: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
+              - Sid: BrowserSessions
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetBrowser
+                  - bedrock-agentcore:ListBrowsers
+                  - bedrock-agentcore:GetBrowserSession
+                  - bedrock-agentcore:ListBrowserSessions
+                  - bedrock-agentcore:ConnectBrowserAutomationStream
+                  - bedrock-agentcore:ConnectBrowserLiveViewStream
+                Resource: "*"
       Tags:
         - Key: Application
           Value: !Ref ApplicationName
