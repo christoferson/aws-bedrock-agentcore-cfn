@@ -1,5 +1,20 @@
+# Stack 1 — IAM. Deploy first; all downstream stacks consume these role ARNs.
 AWSTemplateFormatVersion: "2010-09-09"
-Description: IAM execution role for AgentCore Harness
+Description: IAM roles — HarnessExecutionRole, GatewayRole
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
 
 Parameters:
   ApplicationName:
@@ -12,6 +27,7 @@ Parameters:
 
 Resources:
 
+  # --- Harness execution role (assumed by the AgentCore Harness managed loop) ---
   HarnessExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -25,7 +41,7 @@ Resources:
             Action: sts:AssumeRole
             Condition:
               StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceAccount: !Ref AWS::AccountId  # prevent confused-deputy attacks
               ArnLike:
                 aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
       Policies:
@@ -33,33 +49,97 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: BedrockModels
+              - Sid: BedrockModels # allow both sync and streaming inference
                 Effect: Allow
                 Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
                 Resource:
                   - arn:aws:bedrock:*::foundation-model/*
                   - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
-              - Sid: CloudWatchLogs
+
+              - Sid: CloudWatchLogs # harness writes structured logs here
                 Effect: Allow
                 Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents,
                          logs:DescribeLogGroups, logs:DescribeLogStreams]
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+
               - Sid: XRay
                 Effect: Allow
                 Action: [xray:PutTraceSegments, xray:PutTelemetryRecords,
                          xray:GetSamplingRules, xray:GetSamplingTargets]
                 Resource: "*"
-              - Sid: CloudWatchMetrics # namespace-scoped per docs
+
+              - Sid: CloudWatchMetrics # namespace-scoped per service docs
                 Effect: Allow
                 Action: cloudwatch:PutMetricData
                 Resource: "*"
                 Condition:
                   StringEquals:
                     cloudwatch:namespace: bedrock-agentcore
-              - Sid: InvokeGateway # wildcard scoped to account
+
+              - Sid: InvokeGateway # wildcard avoids circular dep with gateway stack
                 Effect: Allow
                 Action: bedrock-agentcore:InvokeGateway
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*"
+
+              # Session event store — harness reads/writes session history via memory events.
+              # ListEvents / CreateEvent / GetEvent / DeleteEvent all require the memory resource.
+              # Source: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
+              - Sid: MemoryEvents
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:DeleteEvent
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/*"
+
+              - Sid: MemoryRecords # long-term memory read/write (optional feature but needed if memory is enabled)
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:BatchCreateMemoryRecords
+                  - bedrock-agentcore:BatchUpdateMemoryRecords
+                  - bedrock-agentcore:BatchDeleteMemoryRecords
+                  - bedrock-agentcore:GetMemoryRecord
+                  - bedrock-agentcore:ListMemoryRecords
+                  - bedrock-agentcore:DeleteMemoryRecord
+                  - bedrock-agentcore:ListActors
+                  - bedrock-agentcore:ListMemoryExtractionJobs
+                  - bedrock-agentcore:GetMemory
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/*"
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Gateway service role (assumed by AgentCore Gateway to call the web-search connector) ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-harness-gateway-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: gateway-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeGateway
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*"
+              - Sid: InvokeWebSearch # resource account segment is "aws" — AWS-managed tool
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeWebSearch
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1"
       Tags:
         - Key: Application
           Value: !Ref ApplicationName
@@ -69,3 +149,5 @@ Resources:
 Outputs:
   HarnessExecutionRoleArn:
     Value: !GetAtt HarnessExecutionRole.Arn
+  GatewayRoleArn:
+    Value: !GetAtt GatewayRole.Arn
