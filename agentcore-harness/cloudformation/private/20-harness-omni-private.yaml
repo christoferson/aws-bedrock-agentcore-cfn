@@ -1,7 +1,7 @@
-# Stack 4/3+ (private) — AgentCore Memory store + Harness in VPC mode (BYO memory pattern).
+# Stack 20 (private) — AgentCore Memory + built-in Code Interpreter + Harness in VPC mode.
 # Deploy after 01-iam and 02-network. Pass their outputs as parameters.
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AgentCore Memory store + Harness with long-term memory (VPC mode)
+Description: AgentCore Memory store + code interpreter tool + Harness omni (VPC mode)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -16,21 +16,23 @@ Metadata:
         Parameters:
           - HarnessExecutionRoleArn
       - Label:
-          default: Network (existing VPC + from stack 02-network)
+          default: Network (from stack 02-network)
         Parameters:
-          - PrivateSubnetIds
+          - HarnessPrivateSubnetIds
           - HarnessSecurityGroupId
       - Label:
-          default: Memory configuration
+          default: Memory (Short-Term)
         Parameters:
-          - EventExpiryDays
-          - MessagesCount
+          - MemoryRetentionDays
+          - MemoryContextSlidingWindowSize
+      - Label:
+          default: Memory (Long-Term) — strategies configured in template
       - Label:
           default: Agent configuration
         Parameters:
-          - ModelId
-          - MaxIterations
-          - TimeoutSeconds
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
     ParameterLabels:
       ApplicationName:
         default: Application name prefix
@@ -38,19 +40,19 @@ Metadata:
         default: Deployment environment (dev / stg / prd)
       HarnessExecutionRoleArn:
         default: Harness execution role ARN (01-iam output)
-      PrivateSubnetIds:
+      HarnessPrivateSubnetIds:
         default: Private subnet IDs (comma-separated, same list passed to 02-network)
       HarnessSecurityGroupId:
         default: Harness security group ID (02-network output)
-      EventExpiryDays:
-        default: Short-term event retention (days, 3–365)
-      MessagesCount:
-        default: Recent messages to load from memory per invocation
-      ModelId:
+      MemoryRetentionDays:
+        default: Event retention (days, 3–365)
+      MemoryContextSlidingWindowSize:
+        default: Messages injected per invocation
+      FoundationModelId:
         default: Bedrock model ID
-      MaxIterations:
+      AgentMaxIterations:
         default: Max agent loop iterations per invocation
-      TimeoutSeconds:
+      AgentTimeoutSeconds:
         default: Max duration per invocation (seconds)
 
 Parameters:
@@ -64,28 +66,36 @@ Parameters:
   HarnessExecutionRoleArn:
     Type: String
     Description: HarnessExecutionRoleArn from stack 01-iam
-  PrivateSubnetIds:
+  HarnessPrivateSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Comma-separated list of existing private subnet IDs
   HarnessSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: HarnessSecurityGroupId from stack 02-network
-  EventExpiryDays:
+  MemoryRetentionDays:
     Type: Number
-    Default: 30
+    Default: 7
     MinValue: 3
     MaxValue: 365
-  MessagesCount:
+    # Default is 7 days because extraction strategies are active in this template.
+    # Summarization and Semantic strategies extract knowledge into their namespaces within hours of each session.
+    # Once extracted, the source events are redundant — retaining them longer adds storage cost with no benefit.
+    # Raise to 30–90 days only if you need raw event history for audit, replay, or debugging purposes.
+    # If using a harness WITHOUT memory strategies, use 30+ days — events are the only form of memory.
+  MemoryContextSlidingWindowSize:
     Type: Number
     Default: 20
-    Description: Number of recent short-term messages injected into context per invocation
-  ModelId:
+    # Message count is deceptive: each tool-use round = 4 messages (user + tool-call + tool-result + response).
+    # 20 messages = ~5 code interpreter rounds before the oldest turns are dropped.
+    # 10 is a safer cross-purpose default: ~5 chat turns or ~2-3 tool-use rounds, keeping context lean.
+    # Raise toward 20-30 for pure-chat agents; keep at 10 or lower for tool-heavy agents.
+  FoundationModelId:
     Type: String
     Default: global.anthropic.claude-sonnet-4-6
-  MaxIterations:
+  AgentMaxIterations:
     Type: Number
-    Default: 100
-  TimeoutSeconds:
+    Default: 200
+  AgentTimeoutSeconds:
     Type: Number
     Default: 300
 
@@ -96,7 +106,7 @@ Resources:
   # SHORT-TERM memory: raw events (messages, tool calls) written on every invocation.
   #   Scope: per actorId + sessionId. Gives turn-by-turn continuity within a session.
   #   Controlled by: EventExpiryDuration (how long events are kept) and
-  #                  MessagesCount on the Harness (how many recent messages are loaded per invocation).
+  #                  MemoryContextSlidingWindowSize on the Harness (how many recent messages are loaded per invocation).
   #
   # LONG-TERM memory: knowledge extracted from events by MemoryStrategies.
   #   Scope: per actorId across sessions. Retrieved via semantic search and injected into context.
@@ -109,7 +119,7 @@ Resources:
       Description: !Sub "Memory store for ${ApplicationName} ${Environment} VPC harness"
       # SHORT-TERM: retention window for raw session events.
       # Applies per event at write time — does not backfill existing events.
-      EventExpiryDuration: !Ref EventExpiryDays
+      EventExpiryDuration: !Ref MemoryRetentionDays
       # LONG-TERM: extraction strategies. Each strategy defines what to extract and where to store it.
       # NamespaceTemplates are optional — omit to use the service default shown in each comment.
       # {actorId} and {sessionId} are filled at runtime from the invocation parameters.
@@ -151,19 +161,26 @@ Resources:
     Type: AWS::BedrockAgentCore::Harness
     DependsOn: Memory
     Properties:
-      HarnessName: !Sub "${ApplicationName}_${Environment}_vpc_memory"  # HarnessName forces replacement on change
+      HarnessName: !Sub "${ApplicationName}_${Environment}_vpc_omni"  # HarnessName forces replacement on change
       ExecutionRoleArn: !Ref HarnessExecutionRoleArn
       Model:
         BedrockModelConfig:
-          ModelId: !Ref ModelId
+          FoundationModelId: !Ref FoundationModelId
           ApiFormat: converse_stream
       SystemPrompt:
-        - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment. You remember previous conversations and can recall facts about the user."
+        - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment. You can write and execute code to analyze data and solve problems. You remember previous conversations and can recall facts about the user."
+      Tools:
+        # Built-in code interpreter — no custom resource needed; service uses aws.codeinterpreter.v1 automatically.
+        # IAM: CodeInterpreterSessionsBuiltin statement in 01-iam.yaml covers the required permissions.
+        - Type: agentcore_code_interpreter
+          Name: code_interpreter
+          Config:
+            AgentCoreCodeInterpreter: {}  # CodeInterpreterArn omitted — uses built-in aws.codeinterpreter.v1
       Memory:
         AgentCoreMemoryConfiguration:
           Arn: !GetAtt Memory.MemoryArn       # BYO reference — links this harness to the Memory resource above
           # SHORT-TERM: how many recent messages are loaded from the event store per invocation.
-          MessagesCount: !Ref MessagesCount
+          MemoryContextSlidingWindowSize: !Ref MemoryContextSlidingWindowSize
           # ActorId omitted — callers pass actorId at invoke time to scope memory per user.
           # Set a fixed value here only if all users share the same memory lane.
           # ActorId: default
@@ -172,12 +189,17 @@ Resources:
           NetworkConfiguration:
             NetworkMode: VPC  # places harness ENIs in private subnets; no inbound public endpoint
             NetworkModeConfig:
-              Subnets: !Ref PrivateSubnetIds
+              Subnets: !Ref HarnessPrivateSubnetIds
               SecurityGroups:
                 - !Ref HarnessSecurityGroupId
-      MaxIterations: !Ref MaxIterations
-      TimeoutSeconds: !Ref TimeoutSeconds
+      AgentMaxIterations: !Ref AgentMaxIterations
+      AgentTimeoutSeconds: !Ref AgentTimeoutSeconds
       Truncation:
+        # sliding_window is the right choice when Memory is enabled.
+        # SummaryMemoryStrategy already compresses older turns into long-term storage after each session,
+        # so the context window only needs to hold the current session's recent turns — not the full history.
+        # Using 'summarization' truncation on top of SummaryMemoryStrategy would do similar work twice.
+        # Use 'summarization' instead only if Memory is disabled and single-session history must be preserved in full.
         Strategy: sliding_window
       Tags:
         - Key: Application
