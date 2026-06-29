@@ -1,0 +1,196 @@
+# Stack 2/3 (private) — AgentCore/Bedrock VPC endpoints and security groups only.
+# Assumes an existing VPC with private subnets that already have NAT or internet access.
+# ECR Public (public.ecr.aws) has no VPC endpoint — the existing NAT/internet path is required
+# for Harness managed container pulls. See aws-documentation/agentcore-vpc.md for details.
+#
+# NOTE: An S3 Gateway endpoint (com.amazonaws.{region}.s3) is also recommended to avoid
+# NAT charges for ECR private layer pulls, but it requires a private route table ID as input.
+# Add it separately to your existing VPC if needed — it is free.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore/Bedrock VPC endpoints and security groups
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: Existing network
+        Parameters:
+          - VpcId
+          - VpcCidr
+          - PrivateSubnetIds
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      VpcId:
+        default: Existing VPC ID
+      VpcCidr:
+        default: VPC CIDR block (used to scope endpoint SG ingress)
+      PrivateSubnetIds:
+        default: Private subnet IDs for endpoint and Harness ENIs (comma-separated)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: ID of the existing VPC
+  VpcCidr:
+    Type: String
+    Description: CIDR of the existing VPC, e.g. 10.0.0.0/16
+    Default: "10.0.0.0/16"
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Comma-separated list of existing private subnet IDs
+
+Resources:
+
+  # --- Security group for interface endpoint ENIs ---
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS from VPC
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr  # allow HTTPS from any resource in this VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${ApplicationName}-${Environment}-endpoint-sg"
+
+  # --- Harness security group (applied to Runtime ENIs created by AgentCore) ---
+  HarnessSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Harness egress HTTPS only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"  # reaches VPC endpoint ENIs (via DNS) and NAT for ECR Public
+      Tags:
+        - Key: Name
+          Value: !Sub "${ApplicationName}-${Environment}-harness-sg"
+
+  # =========================================================================
+  # VPC Interface Endpoints — private DNS enabled; traffic stays off NAT GW
+  # =========================================================================
+
+  # AgentCore data plane: Runtime invoke, Memory events, Built-in Tools, Identity
+  BedrockAgentCoreEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-agentcore"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # AgentCore control plane: create/update/delete Harness, Memory, Runtime resources
+  BedrockAgentCoreControlEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-agentcore-control"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # Bedrock model inference (bedrock:InvokeModel, InvokeModelWithResponseStream)
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # ECR — container image pull API calls
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # ECR — Docker registry protocol (layer pulls from ECR private repos)
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # CloudWatch Logs — log delivery from Runtime containers
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # X-Ray — distributed tracing
+  XRayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.xray"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # CloudWatch Metrics — PutMetricData
+  MonitoringEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.monitoring"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # STS — sts:GetServiceBearerToken used alongside ecr-public:GetAuthorizationToken
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+Outputs:
+  HarnessSecurityGroupId:
+    Value: !Ref HarnessSecurityGroup
+  EndpointSecurityGroupId:
+    Value: !Ref EndpointSecurityGroup
