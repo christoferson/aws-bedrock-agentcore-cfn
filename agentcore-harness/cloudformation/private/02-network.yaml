@@ -18,7 +18,7 @@ Metadata:
           - ApplicationName
           - Environment
       - Label:
-          default: Existing network
+          default: Existing Network
         Parameters:
           - VpcId
           - VpcCidr
@@ -33,7 +33,7 @@ Metadata:
       VpcCidr:
         default: VPC CIDR block (used to scope endpoint SG ingress)
       PrivateSubnetIds:
-        default: Private subnet IDs for endpoint and Harness ENIs (comma-separated)
+        default: Private subnet IDs (comma-separated)
 
 Parameters:
   ApplicationName:
@@ -112,82 +112,85 @@ Resources:
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
       PrivateDnsEnabled: true
 
+  # The following endpoints are optional but recommended if not already present in the VPC.
+  # Uncomment to provision them here, or add them to your existing VPC separately.
+
   # Bedrock model inference (bedrock:InvokeModel, InvokeModelWithResponseStream)
-  BedrockRuntimeEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # BedrockRuntimeEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
   # ECR — container image pull API calls
-  EcrApiEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # EcrApiEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
   # ECR — Docker registry protocol (layer pulls from ECR private repos)
-  EcrDkrEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # EcrDkrEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
   # CloudWatch Logs — log delivery from Runtime containers
-  CloudWatchLogsEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # CloudWatchLogsEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
   # X-Ray — distributed tracing
-  XRayEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.xray"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # XRayEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.xray"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
   # CloudWatch Metrics — PutMetricData
-  MonitoringEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.monitoring"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # MonitoringEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.monitoring"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
   # STS — sts:GetServiceBearerToken used alongside ecr-public:GetAuthorizationToken
-  StsEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
-      VpcEndpointType: Interface
-      SubnetIds: !Ref PrivateSubnetIds
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
-      PrivateDnsEnabled: true
+  # StsEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
 
 Outputs:
   HarnessSecurityGroupId:
