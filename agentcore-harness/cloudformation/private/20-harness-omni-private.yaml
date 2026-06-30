@@ -33,6 +33,7 @@ Metadata:
           - FoundationModelId
           - AgentMaxIterations
           - AgentTimeoutSeconds
+          - AgentTemperature
     ParameterLabels:
       ApplicationName:
         default: Application name prefix
@@ -54,6 +55,8 @@ Metadata:
         default: Max agent loop iterations per invocation
       AgentTimeoutSeconds:
         default: Max duration per invocation (seconds)
+      AgentTemperature:
+        default: Model temperature (0–1)
 
 Parameters:
   ApplicationName:
@@ -98,6 +101,11 @@ Parameters:
   AgentTimeoutSeconds:
     Type: Number
     Default: 300
+  AgentTemperature:
+    Type: Number
+    Default: 0.1
+    MinValue: 0
+    MaxValue: 1
 
 Resources:
 
@@ -167,6 +175,7 @@ Resources:
         BedrockModelConfig:
           ModelId: !Ref FoundationModelId
           ApiFormat: converse_stream
+          Temperature: !Ref AgentTemperature
       SystemPrompt:
         - Text: "You are a helpful assistant. You can write and execute code to analyze data and solve problems, and browse the web to find current information. You remember previous conversations and can recall facts about the user."
       Tools:
