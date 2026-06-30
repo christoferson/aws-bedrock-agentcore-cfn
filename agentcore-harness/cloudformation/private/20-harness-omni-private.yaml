@@ -168,7 +168,7 @@ Resources:
           ModelId: !Ref FoundationModelId
           ApiFormat: converse_stream
       SystemPrompt:
-        - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment. You can write and execute code to analyze data and solve problems. You remember previous conversations and can recall facts about the user."
+        - Text: "You are a helpful assistant. You can write and execute code to analyze data and solve problems, and browse the web to find current information. You remember previous conversations and can recall facts about the user."
       Tools:
         # Built-in code interpreter — no custom resource needed; service uses aws.codeinterpreter.v1 automatically.
         # IAM: CodeInterpreterSessionsBuiltin statement in 01-iam.yaml covers the required permissions.
@@ -176,6 +176,13 @@ Resources:
           Name: code_interpreter
           Config:
             AgentCoreCodeInterpreter: {}  # CodeInterpreterArn omitted — uses built-in aws.codeinterpreter.v1
+
+        # Built-in browser — no custom resource needed; service uses aws.browser.v1 automatically.
+        # IAM: BrowserSessionsBuiltin statement in 01-iam.yaml covers the required permissions.
+        - Type: agentcore_browser
+          Name: web_browser
+          Config:
+            AgentCoreBrowser: {}  # BrowserArn omitted — uses built-in aws.browser.v1
       Memory:
         AgentCoreMemoryConfiguration:
           Arn: !GetAtt Memory.MemoryArn       # BYO reference — links this harness to the Memory resource above
