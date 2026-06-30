@@ -1,0 +1,160 @@
+# Stack 10 (private) — Gateway (web-search) wired as a tool into a Harness in VPC mode.
+# Deploy after 01-iam and 02-network. Pass their outputs as parameters.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Harness with Gateway web-search connector (VPC mode)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - HarnessExecutionRoleArn
+          - GatewayRoleArn
+      - Label:
+          default: Network (from stack 02-network)
+        Parameters:
+          - HarnessPrivateSubnetIds
+          - HarnessSecurityGroupId
+      - Label:
+          default: Agent configuration
+        Parameters:
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      HarnessExecutionRoleArn:
+        default: Harness execution role ARN (01-iam output)
+      GatewayRoleArn:
+        default: Gateway role ARN (01-iam output)
+      HarnessPrivateSubnetIds:
+        default: Private subnet IDs (comma-separated, same list passed to 02-network)
+      HarnessSecurityGroupId:
+        default: Harness security group ID (02-network output)
+      FoundationModelId:
+        default: Bedrock model ID
+      AgentMaxIterations:
+        default: Max agent loop iterations per invocation
+      AgentTimeoutSeconds:
+        default: Max duration per invocation (seconds)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  HarnessExecutionRoleArn:
+    Type: String
+    Description: HarnessExecutionRoleArn from stack 01-iam
+  GatewayRoleArn:
+    Type: String
+    Description: GatewayRoleArn from stack 01-iam
+  HarnessPrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Comma-separated list of existing private subnet IDs
+  HarnessSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: HarnessSecurityGroupId from stack 02-network
+  FoundationModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  AgentMaxIterations:
+    Type: Number
+    Default: 10
+  AgentTimeoutSeconds:
+    Type: Number
+    Default: 300
+
+Resources:
+
+  # --- Gateway (AWS_IAM — callers must sign requests with SigV4) ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-harness-gateway"
+      RoleArn: !Ref GatewayRoleArn  # role the gateway assumes to call web-search
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      Description: !Sub "${ApplicationName} ${Environment} harness web search gateway"
+      Tags:
+        Application: !Ref ApplicationName  # Gateway Tags is a flat Object of String (not Array of Tag)
+        Environment: !Ref Environment
+
+  # --- Web search connector target (Amazon-managed; us-east-1 only; $7/1000 queries) ---
+  WebSearchTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: web-search
+      Description: Amazon web search (us-east-1 only; $7/1000 queries)
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            Source:
+              ConnectorId: web-search  # built-in connector; account is "aws", not customer
+            Configurations:
+              - Name: WebSearch
+                ParameterValues: {}
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE  # gateway uses its own role to sign web-search calls
+
+  # --- Harness in VPC mode wired to the Gateway as an agentcore_gateway tool ---
+  Harness:
+    Type: AWS::BedrockAgentCore::Harness
+    DependsOn: WebSearchTarget  # gateway target must exist before the harness resolves it
+    Properties:
+      HarnessName: !Sub "${ApplicationName}_${Environment}_vpc_gateway_websearch"  # HarnessName forces replacement on change
+      ExecutionRoleArn: !Ref HarnessExecutionRoleArn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref FoundationModelId
+          ApiFormat: converse_stream
+      SystemPrompt:
+        - Text: "You are a helpful research assistant. Use the available tools to find current information."
+      Tools:
+        - Type: agentcore_gateway    # tells the harness to discover tools via the MCP gateway
+          Name: web-search-gateway
+          Config:
+            AgentCoreGateway:
+              GatewayArn: !GetAtt Gateway.GatewayArn
+      Environment:
+        AgentCoreRuntimeEnvironment:
+          NetworkConfiguration:
+            NetworkMode: VPC  # places harness ENIs in private subnets; no inbound public endpoint
+            NetworkModeConfig:
+              Subnets: !Ref HarnessPrivateSubnetIds
+              SecurityGroups:
+                - !Ref HarnessSecurityGroupId
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
+      Truncation:
+        Strategy: sliding_window
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+  HarnessArn:
+    Value: !GetAtt Harness.Arn
+  HarnessId:
+    Value: !GetAtt Harness.HarnessId
+  RuntimeArn:
+    Value: !GetAtt Harness.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
