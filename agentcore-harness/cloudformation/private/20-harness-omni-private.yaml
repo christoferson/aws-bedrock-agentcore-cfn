@@ -165,7 +165,7 @@ Resources:
       ExecutionRoleArn: !Ref HarnessExecutionRoleArn
       Model:
         BedrockModelConfig:
-          FoundationModelId: !Ref FoundationModelId
+          ModelId: !Ref FoundationModelId
           ApiFormat: converse_stream
       SystemPrompt:
         - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment. You can write and execute code to analyze data and solve problems. You remember previous conversations and can recall facts about the user."
@@ -180,7 +180,7 @@ Resources:
         AgentCoreMemoryConfiguration:
           Arn: !GetAtt Memory.MemoryArn       # BYO reference — links this harness to the Memory resource above
           # SHORT-TERM: how many recent messages are loaded from the event store per invocation.
-          MemoryContextSlidingWindowSize: !Ref MemoryContextSlidingWindowSize
+          MessagesCount: !Ref MemoryContextSlidingWindowSize
           # ActorId omitted — callers pass actorId at invoke time to scope memory per user.
           # Set a fixed value here only if all users share the same memory lane.
           # ActorId: default
@@ -192,8 +192,8 @@ Resources:
               Subnets: !Ref HarnessPrivateSubnetIds
               SecurityGroups:
                 - !Ref HarnessSecurityGroupId
-      AgentMaxIterations: !Ref AgentMaxIterations
-      AgentTimeoutSeconds: !Ref AgentTimeoutSeconds
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
       Truncation:
         # sliding_window is the right choice when Memory is enabled.
         # SummaryMemoryStrategy already compresses older turns into long-term storage after each session,
