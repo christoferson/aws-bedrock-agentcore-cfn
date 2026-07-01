@@ -1,0 +1,485 @@
+# Stack 21 (private) — Omni harness (VPC) with Cognito inbound authentication.
+# Extends 20-harness-omni-private: adds Cognito User Pool + AuthorizerConfiguration on the Harness.
+# Deploy after 01-iam and 02-network. Pass their outputs as parameters.
+#
+# -----------------------------------------------------------------------
+# Auth flow
+# -----------------------------------------------------------------------
+#
+#   AgentCore Client --(authorization_code + PKCE)--> Cognito Hosted UI
+#   Cognito --> ID token (JWT signed by the User Pool)
+#   AgentCore Client --(Authorization: Bearer <id_token>)--> Harness runtime endpoint
+#   Harness AuthorizerConfiguration validates JWT signature + aud claim --> grants access
+#
+# -----------------------------------------------------------------------
+# Post-deploy setup
+# -----------------------------------------------------------------------
+#
+# 1. Note stack outputs:
+#      InboundUserPoolId       — e.g. us-east-1_AbCdEfGhI
+#      InboundUserPoolClientId — e.g. 1a2b3c4d5e6f7g8h9i0j
+#      InboundHostedUiUrl      — e.g. https://my-prefix.auth.us-east-1.amazoncognito.com
+#      RuntimeArn              — the Harness runtime endpoint ARN
+#
+# 2. Create a test user:
+#      aws cognito-idp admin-create-user \
+#        --user-pool-id <InboundUserPoolId> \
+#        --username user@example.com \
+#        --temporary-password Temp1234!
+#
+#      aws cognito-idp admin-set-user-password \
+#        --user-pool-id <InboundUserPoolId> \
+#        --username user@example.com \
+#        --password MyPerm1234! \
+#        --permanent
+#
+# 3. Get an ID token
+#
+#    Option A — Hosted UI (browser):
+#      Open: <InboundHostedUiUrl>/login
+#              ?response_type=code
+#              &client_id=<InboundUserPoolClientId>
+#              &redirect_uri=<InboundCognitoCallbackUrl>
+#              &scope=openid+email+profile
+#      Complete sign-in; Cognito redirects with ?code=<auth_code>
+#      Exchange code for tokens:
+#        curl -X POST <InboundHostedUiUrl>/oauth2/token \
+#          -H "Content-Type: application/x-www-form-urlencoded" \
+#          -d "grant_type=authorization_code \
+#              &client_id=<InboundUserPoolClientId> \
+#              &redirect_uri=<InboundCognitoCallbackUrl> \
+#              &code=<auth_code>"
+#      Use the returned id_token.
+#
+#    Option B — CLI (enable USER_PASSWORD_AUTH on the client first):
+#      aws cognito-idp initiate-auth \
+#        --auth-flow USER_PASSWORD_AUTH \
+#        --client-id <InboundUserPoolClientId> \
+#        --auth-parameters USERNAME=user@example.com,PASSWORD=MyPerm1234!
+#      Use AuthenticationResult.IdToken from the response.
+#      Note: add ALLOW_USER_PASSWORD_AUTH to ExplicitAuthFlows in this template to enable Option B.
+#
+#    Option C — Python / boto3 (e.g. called from a Streamlit app):
+#      pip install boto3 warrant  # warrant handles SRP; or use amazon-cognito-identity-py
+#
+#      import boto3
+#
+#      cognito = boto3.client("cognito-idp", region_name="<region>")
+#
+#      # Step 1 — authenticate and get tokens (USER_SRP_AUTH is preferred;
+#      #           or use USER_PASSWORD_AUTH if ALLOW_USER_PASSWORD_AUTH is enabled)
+#      resp = cognito.initiate_auth(
+#          AuthFlow="USER_PASSWORD_AUTH",          # requires ALLOW_USER_PASSWORD_AUTH in template
+#          ClientId="<InboundUserPoolClientId>",
+#          AuthParameters={
+#              "USERNAME": "user@example.com",
+#              "PASSWORD": "MyPerm1234!",
+#          },
+#      )
+#      id_token = resp["AuthenticationResult"]["IdToken"]
+#
+#      # Step 2 — invoke the Harness with the ID token as bearer
+#      agentcore = boto3.client("bedrock-agentcore", region_name="<region>")
+#      response = agentcore.invoke_agent_runtime(
+#          agentRuntimeArn="<RuntimeArn>",
+#          sessionId="<any-uuid>",                 # same sessionId = same conversation thread
+#          bearerToken=id_token,
+#          body={"inputText": "Hello"},
+#      )
+#      print(response["body"])
+#
+#      # In Streamlit: store id_token in st.session_state and refresh when expired (ExpiresIn=3600).
+#      # Use RefreshToken from AuthenticationResult to silently re-authenticate:
+#      #   cognito.initiate_auth(AuthFlow="REFRESH_TOKEN_AUTH",
+#      #                         ClientId=..., AuthParameters={"REFRESH_TOKEN": refresh_token})
+#
+#    Option D — React (authorization code + PKCE, using amazon-cognito-identity-js or Amplify):
+#      npm install aws-amplify   # or: npm install amazon-cognito-identity-js
+#
+#      // amplify-config.js
+#      import { Amplify } from "aws-amplify";
+#      Amplify.configure({
+#        Auth: {
+#          Cognito: {
+#            userPoolId:       "<InboundUserPoolId>",
+#            userPoolClientId: "<InboundUserPoolClientId>",
+#            loginWith: {
+#              oauth: {
+#                domain:        "<InboundCognitoDomainPrefix>.auth.<region>.amazoncognito.com",
+#                scopes:        ["openid", "email", "profile"],
+#                redirectSignIn:  ["<InboundCognitoCallbackUrl>"],
+#                redirectSignOut: ["<InboundCognitoCallbackUrl>"],
+#                responseType: "code",  // PKCE — no client secret needed
+#              },
+#            },
+#          },
+#        },
+#      });
+#
+#      // In your component — sign in via hosted UI then call the Harness
+#      import { signInWithRedirect, fetchAuthSession } from "aws-amplify/auth";
+#
+#      // Trigger hosted UI login
+#      await signInWithRedirect();
+#
+#      // After redirect back — get the ID token
+#      const session = await fetchAuthSession();
+#      const idToken = session.tokens.idToken.toString();
+#
+#      // Call the Harness via a backend proxy (recommended — keeps token server-side)
+#      // or directly if your React app is inside the VPC / has VPC access.
+#      const res = await fetch("/api/invoke", {        // your backend proxy endpoint
+#        method: "POST",
+#        headers: { "Content-Type": "application/json" },
+#        body: JSON.stringify({ idToken, inputText: "Hello", sessionId: crypto.randomUUID() }),
+#      });
+#
+#      // Backend proxy (Node/Lambda/FastAPI) forwards to AgentCore:
+#      //   POST to RuntimeArn endpoint with Authorization: Bearer <idToken>
+#      //   The Harness validates the JWT and responds.
+#      //
+#      // Note: do NOT call the Harness directly from React in production — the RuntimeArn
+#      // endpoint is VPC-only in this template. Use a backend proxy inside the VPC.
+#
+# 4. Invoke the Harness:
+#      aws bedrock-agentcore invoke-agent-runtime \
+#        --agent-runtime-arn <RuntimeArn> \
+#        --session-id <any-uuid> \
+#        --bearer-token <id_token> \
+#        --body '{"inputText": "Hello"}'
+#
+# -----------------------------------------------------------------------
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AgentCore Omni Harness (VPC mode) with Cognito JWT inbound auth
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - HarnessExecutionRoleArn
+      - Label:
+          default: Network (from stack 02-network)
+        Parameters:
+          - HarnessPrivateSubnetIds
+          - HarnessSecurityGroupId
+      - Label:
+          default: Cognito — Inbound
+        Parameters:
+          - InboundCognitoDomainPrefix
+          - InboundCognitoCallbackUrl
+      - Label:
+          default: Memory (Short-Term)
+        Parameters:
+          - MemoryRetentionDays
+          - MemoryContextSlidingWindowSize
+      - Label:
+          default: Memory (Long-Term) — strategies configured in template
+      - Label:
+          default: Agent configuration
+        Parameters:
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
+          - AgentTemperature
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      HarnessExecutionRoleArn:
+        default: Harness execution role ARN (01-iam output)
+      HarnessPrivateSubnetIds:
+        default: Private subnet IDs (comma-separated, same list passed to 02-network)
+      HarnessSecurityGroupId:
+        default: Harness security group ID (02-network output)
+      InboundCognitoDomainPrefix:
+        default: Hosted UI domain prefix (must be globally unique in region)
+      InboundCognitoCallbackUrl:
+        default: AgentCore Client callback URL registered in Cognito
+      MemoryRetentionDays:
+        default: Event retention (days, 3–365)
+      MemoryContextSlidingWindowSize:
+        default: Messages injected per invocation
+      FoundationModelId:
+        default: Bedrock model ID
+      AgentMaxIterations:
+        default: Max agent loop iterations per invocation
+      AgentTimeoutSeconds:
+        default: Max duration per invocation (seconds)
+      AgentTemperature:
+        default: Model temperature (0–1)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stg
+      - prd
+  HarnessExecutionRoleArn:
+    Type: String
+    Description: HarnessExecutionRoleArn from stack 01-iam
+  HarnessPrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Comma-separated list of existing private subnet IDs
+  HarnessSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: HarnessSecurityGroupId from stack 02-network
+  InboundCognitoDomainPrefix:
+    Type: String
+    Description: Globally unique Cognito hosted UI domain prefix for the inbound pool
+  InboundCognitoCallbackUrl:
+    Type: String
+    Default: http://localhost:8080
+    Description: AgentCore Client redirect URL — update to production URL before
+      deploying to production
+  MemoryRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 3
+    MaxValue: 365
+    # Default is 7 days because extraction strategies are active in this template.
+    # Summarization and Semantic strategies extract knowledge into their namespaces within hours of each session.
+    # Once extracted, the source events are redundant — retaining them longer adds storage cost with no benefit.
+    # Raise to 30–90 days only if you need raw event history for audit, replay, or debugging purposes.
+    # If using a harness WITHOUT memory strategies, use 30+ days — events are the only form of memory.
+  MemoryContextSlidingWindowSize:
+    Type: Number
+    Default: 20
+    # Message count is deceptive: each tool-use round = 4 messages (user + tool-call + tool-result + response).
+    # 20 messages = ~5 code interpreter rounds before the oldest turns are dropped.
+    # 10 is a safer cross-purpose default: ~5 chat turns or ~2-3 tool-use rounds, keeping context lean.
+    # Raise toward 20-30 for pure-chat agents; keep at 10 or lower for tool-heavy agents.
+  FoundationModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  AgentMaxIterations:
+    Type: Number
+    Default: 200
+  AgentTimeoutSeconds:
+    Type: Number
+    Default: 300
+  AgentTemperature:
+    Type: Number
+    Default: 0.1
+    MinValue: 0
+    MaxValue: 1
+
+Resources:
+
+  # -----------------------------------------------------------------------
+  # Cognito — Inbound User Pool
+  # AgentCore Client users authenticate here; Harness validates their ID tokens.
+  # -----------------------------------------------------------------------
+
+  InboundUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${ApplicationName}-${Environment}-omni-inbound
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  InboundUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref InboundCognitoDomainPrefix
+      UserPoolId: !Ref InboundUserPool
+
+  InboundUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref InboundUserPool
+      ClientName: !Sub ${ApplicationName}-${Environment}-client
+      GenerateSecret: false # public client — AgentCore Client uses PKCE
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Ref InboundCognitoCallbackUrl
+      LogoutURLs:
+        - !Ref InboundCognitoCallbackUrl
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        # Uncomment to enable CLI token retrieval (Option B in header):
+        # - ALLOW_USER_PASSWORD_AUTH
+
+        # -----------------------------------------------------------------------
+        # AgentCore Memory store (unchanged from stack 20)
+        # -----------------------------------------------------------------------
+
+        # --- AgentCore Memory store (BYO pattern — explicit resource gives control over strategies and expiry) ---
+        #
+        # SHORT-TERM memory: raw events (messages, tool calls) written on every invocation.
+        #   Scope: per actorId + sessionId. Gives turn-by-turn continuity within a session.
+        #   Controlled by: EventExpiryDuration (how long events are kept) and
+        #                  MemoryContextSlidingWindowSize on the Harness (how many recent messages are loaded per invocation).
+        #
+        # LONG-TERM memory: knowledge extracted from events by MemoryStrategies.
+        #   Scope: per actorId across sessions. Retrieved via semantic search and injected into context.
+        #   Controlled by: which MemoryStrategies are enabled below.
+        #
+  Memory:
+    Type: AWS::BedrockAgentCore::Memory
+    Properties:
+      Name: !Sub ${ApplicationName}_${Environment}_vpc_cognito_memory # Name forces replacement on change
+      Description: !Sub Memory store for ${ApplicationName} ${Environment} VPC cognito harness
+      # SHORT-TERM: retention window for raw session events.
+      # Applies per event at write time — does not backfill existing events.
+      EventExpiryDuration: !Ref MemoryRetentionDays
+      # LONG-TERM: extraction strategies. Each strategy defines what to extract and where to store it.
+      # NamespaceTemplates are optional — omit to use the service default shown in each comment.
+      # {actorId} and {sessionId} are filled at runtime from the invocation parameters.
+      MemoryStrategies:
+        # Per-session structural recap of topics, tasks, and decisions.
+        # Service default namespace: /strategy/{memoryStrategyId}/actor/{actorId}/session/{sessionId}/
+        - SummaryMemoryStrategy:
+            Name: SessionSummarizer
+            NamespaceTemplates:
+              - /summaries/{actorId}/{sessionId}/
+
+        # Factual knowledge across sessions: entities, events, deadlines, versions.
+        # Service default namespace: /strategy/{memoryStrategyId}/actors/{actorId}/
+        - SemanticMemoryStrategy:
+            Name: FactExtractor
+            NamespaceTemplates:
+              - /facts/{actorId}/
+        # Stylistic settings and user likes/dislikes: shipping preference, coding style, tone.
+        # Service default namespace: /strategy/{memoryStrategyId}/actors/{actorId}/
+        # - UserPreferenceMemoryStrategy:
+        #     Name: PreferenceTracker
+        #     NamespaceTemplates:
+        #       - "/preferences/{actorId}/"
+
+        # Sequences of multi-turn tool use and event blocks (situation, intent, assessment).
+        # Also produces cross-episode reflections. Service has no single default namespace.
+        # - EpisodicMemoryStrategy:
+        #     Name: EpisodeRecorder
+        #     NamespaceTemplates:
+        #       - "/episodic/{actorId}/{sessionId}/"
+
+      Tags:
+        Application: !Ref ApplicationName # Memory Tags is a flat Object of String (not Array of Tag)
+        Environment: !Ref Environment
+
+  # -----------------------------------------------------------------------
+  # AgentCore Harness — VPC mode + Cognito inbound auth
+  # -----------------------------------------------------------------------
+
+  Harness:
+    Type: AWS::BedrockAgentCore::Harness
+    DependsOn: Memory
+    Properties:
+      HarnessName: !Sub ${ApplicationName}_${Environment}_vpc_omni_cognito # HarnessName forces replacement on change
+      ExecutionRoleArn: !Ref HarnessExecutionRoleArn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref FoundationModelId
+          ApiFormat: converse_stream
+          Temperature: !Ref AgentTemperature
+      # Inbound JWT validation — AgentCore Client passes a Cognito token as Authorization: Bearer <token>.
+      # AllowedClients matches the client_id claim, which is the app client ID in both ID tokens and
+      # access tokens. Preferred over AllowedAudience because:
+      #   - ID token:     aud = app client ID  (AllowedAudience works, AllowedClients works)
+      #   - Access token: aud = resource server identifier  (AllowedAudience breaks, AllowedClients works)
+      # Using AllowedClients makes the authorizer token-type agnostic.
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${InboundUserPool}/.well-known/openid-configuration
+          AllowedClients:
+            - !Ref InboundUserPoolClient  # Cognito app client ID — matches client_id claim in both token types
+          # AllowedAudience:
+          #   - !Ref InboundUserPoolClient  # aud claim — works for ID tokens only; breaks for access tokens
+      SystemPrompt:
+        - Text: You are a helpful assistant. You can write and execute code to analyze
+            data and solve problems, and browse the web to find current
+            information. You remember previous conversations and can recall
+            facts about the user.
+      Tools:
+        # Built-in code interpreter — no custom resource needed; service uses aws.codeinterpreter.v1 automatically.
+        # IAM: CodeInterpreterSessionsBuiltin statement in 01-iam.yaml covers the required permissions.
+        - Type: agentcore_code_interpreter
+          Name: code_interpreter
+          Config:
+            AgentCoreCodeInterpreter: {} # CodeInterpreterArn omitted — uses built-in aws.codeinterpreter.v1
+
+        # Built-in browser — no custom resource needed; service uses aws.browser.v1 automatically.
+        # IAM: BrowserSessionsBuiltin statement in 01-iam.yaml covers the required permissions.
+        - Type: agentcore_browser
+          Name: web_browser
+          Config:
+            AgentCoreBrowser: {} # BrowserArn omitted — uses built-in aws.browser.v1
+      Memory:
+        AgentCoreMemoryConfiguration:
+          Arn: !GetAtt Memory.MemoryArn # BYO reference — links this harness to the Memory resource above
+          # SHORT-TERM: how many recent messages are loaded from the event store per invocation.
+          MessagesCount: !Ref MemoryContextSlidingWindowSize
+          # ActorId omitted — callers pass actorId at invoke time to scope memory per user.
+          # Set a fixed value here only if all users share the same memory lane.
+          # ActorId: default
+      Environment:
+        AgentCoreRuntimeEnvironment:
+          NetworkConfiguration:
+            NetworkMode: VPC # places harness ENIs in private subnets; no inbound public endpoint
+            NetworkModeConfig:
+              Subnets: !Ref HarnessPrivateSubnetIds
+              SecurityGroups:
+                - !Ref HarnessSecurityGroupId
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
+      Truncation:
+        # sliding_window is the right choice when Memory is enabled.
+        # SummaryMemoryStrategy already compresses older turns into long-term storage after each session,
+        # so the context window only needs to hold the current session's recent turns — not the full history.
+        # Using 'summarization' truncation on top of SummaryMemoryStrategy would do similar work twice.
+        # Use 'summarization' instead only if Memory is disabled and single-session history must be preserved in full.
+        Strategy: sliding_window
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  InboundUserPoolId:
+    Value: !Ref InboundUserPool
+  InboundUserPoolClientId:
+    Value: !Ref InboundUserPoolClient
+  InboundHostedUiUrl:
+    Value: !Sub https://${InboundCognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com
+  MemoryArn:
+    Value: !GetAtt Memory.MemoryArn
+  MemoryId:
+    Value: !GetAtt Memory.MemoryId
+  HarnessArn:
+    Value: !GetAtt Harness.Arn
+  HarnessId:
+    Value: !GetAtt Harness.HarnessId
+  RuntimeArn:
+    Value: !GetAtt Harness.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
