@@ -1,0 +1,307 @@
+# Stack 12 — Harness → Gateway → Lambda (inspirational note generator).
+# Self-contained: provisions Lambda, GatewayRole, Gateway, GatewayTarget, and Harness.
+# Pass HarnessExecutionRoleArn from stack 01-iam.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Harness with Gateway Lambda target — inspirational note generator
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - HarnessExecutionRoleArn
+      - Label:
+          default: Agent configuration
+        Parameters:
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      HarnessExecutionRoleArn:
+        default: Harness execution role ARN (01-iam output)
+      FoundationModelId:
+        default: Bedrock model ID
+      AgentMaxIterations:
+        default: Max agent loop iterations per invocation
+      AgentTimeoutSeconds:
+        default: Max duration per invocation (seconds)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  HarnessExecutionRoleArn:
+    Type: String
+    Description: HarnessExecutionRoleArn from stack 01-iam
+  FoundationModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  AgentMaxIterations:
+    Type: Number
+    Default: 5
+  AgentTimeoutSeconds:
+    Type: Number
+    Default: 300
+
+Resources:
+
+  # --- Lambda execution role ---
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-inspirational-lambda"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # --- Lambda — inspirational note generator ---
+  # Implements MCP tools/list + tools/call contract.
+  # Tool: get_inspirational_note(theme?, mood?)
+  # Returns a randomly selected note from a curated collection across multiple themes.
+  InspirationalNoteFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ApplicationName}-${Environment}-inspirational-note"
+      Description: Inspirational note generator — MCP tools/list + tools/call
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json, random
+
+          NOTES = {
+              "resilience": [
+                  "Fall seven times, stand up eight. Every stumble is a lesson in disguise.",
+                  "The oak fought the wind and was broken, the willow bent when it must and survived.",
+                  "Rock bottom became the solid foundation on which I rebuilt my life.",
+                  "A river cuts through rock not because of its power but its persistence.",
+                  "Your hardest times often lead to the greatest moments of your life.",
+              ],
+              "growth": [
+                  "What you are today is not what you have to be tomorrow.",
+                  "Growth is uncomfortable. So is staying the same. Choose your discomfort.",
+                  "The seed does not know what kind of tree it will become. Neither do you — and that is beautiful.",
+                  "Every expert was once a beginner who refused to quit.",
+                  "You cannot go back and change the beginning, but you can start where you are and change the ending.",
+              ],
+              "courage": [
+                  "Do one thing every day that scares you. That is where the real life begins.",
+                  "Courage is not the absence of fear — it is deciding that something else matters more.",
+                  "The first step is always the hardest and always the most important.",
+                  "You have been assigned this mountain to show others it can be moved.",
+                  "Bravery is being the only one who knows you are afraid.",
+              ],
+              "purpose": [
+                  "The meaning of life is to find your gift. The purpose of life is to give it away.",
+                  "Do not ask what the world needs. Ask what makes you come alive, and go do it.",
+                  "A small deed done with great love changes the world more than a grand deed done without it.",
+                  "Your life is your message to the world. Make sure it is inspiring.",
+                  "We are not human beings on a spiritual journey. We are spiritual beings on a human journey.",
+              ],
+              "mindfulness": [
+                  "You are exactly where you need to be. Breathe.",
+                  "The present moment is the only moment available to us — and it is the door to all moments.",
+                  "Peace is not something you find. It is something you choose, again and again.",
+                  "Slow down. The answers you seek are not at the end of the rush.",
+                  "In the middle of every difficulty lies opportunity — but only if you are still enough to see it.",
+              ],
+          }
+
+          ALL_THEMES = list(NOTES.keys())
+
+          TOOL_DEF = {
+              "name": "get_inspirational_note",
+              "description": "Returns a random inspirational note, optionally filtered by theme or mood.",
+              "inputSchema": {
+                  "type": "object",
+                  "properties": {
+                      "theme": {
+                          "type": "string",
+                          "description": f"Optional theme filter: {', '.join(ALL_THEMES)}. Omit for a random theme.",
+                      },
+                      "mood": {
+                          "type": "string",
+                          "description": "Optional free-text mood or context hint (e.g. 'feeling stuck', 'starting something new'). Used to pick a fitting theme when no explicit theme is given.",
+                      },
+                  },
+                  "required": [],
+              },
+          }
+
+          MOOD_THEME_HINTS = {
+              "stuck":   "resilience",
+              "tired":   "resilience",
+              "afraid":  "courage",
+              "scared":  "courage",
+              "lost":    "purpose",
+              "new":     "growth",
+              "start":   "growth",
+              "calm":    "mindfulness",
+              "anxious": "mindfulness",
+              "stress":  "mindfulness",
+          }
+
+          def resolve_theme(theme, mood):
+              if theme and theme.lower() in NOTES:
+                  return theme.lower()
+              if mood:
+                  for keyword, mapped in MOOD_THEME_HINTS.items():
+                      if keyword in mood.lower():
+                          return mapped
+              return random.choice(ALL_THEMES)
+
+          def handler(event, context):
+              method = event.get("method", "")
+              if method == "tools/list":
+                  return {"tools": [TOOL_DEF]}
+              if method == "tools/call":
+                  args   = event.get("params", {}).get("arguments", {})
+                  theme  = args.get("theme", "")
+                  mood   = args.get("mood", "")
+                  chosen = resolve_theme(theme, mood)
+                  note   = random.choice(NOTES[chosen])
+                  result = {"note": note, "theme": chosen}
+                  return {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False}
+              return {"content": [{"type": "text", "text": "unknown method"}], "isError": True}
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Lambda resource-based policy — allows Gateway to invoke (dual-permission requirement) ---
+  InspirationalNoteFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InspirationalNoteFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock-agentcore.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # --- Gateway role ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-inspirational-gateway-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt InspirationalNoteFunction.Arn
+
+  # --- Gateway (AWS_IAM) ---
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-inspirational-gateway"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      Description: !Sub "${ApplicationName} ${Environment} inspirational note gateway"
+      Tags:
+        Application: !Ref ApplicationName  # Gateway Tags is a flat Object of String (not Array of Tag)
+        Environment: !Ref Environment
+
+  # --- Lambda target with inline tool schema ---
+  InspirationalNoteTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: inspirational-note
+      Description: Inspirational note generator Lambda
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !GetAtt InspirationalNoteFunction.Arn
+            ToolSchema:
+              InlinePayload:
+                - Name: get_inspirational_note
+                  Description: Returns a random inspirational note, optionally filtered by theme or mood
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      theme:
+                        Type: string
+                        Description: "Theme filter: resilience, growth, courage, purpose, or mindfulness"
+                      mood:
+                        Type: string
+                        Description: Free-text mood or context hint used to pick a fitting theme
+                    Required: []
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE  # gateway uses its role to invoke Lambda
+
+  # --- Harness (public mode) wired to the Gateway ---
+  Harness:
+    Type: AWS::BedrockAgentCore::Harness
+    DependsOn: InspirationalNoteTarget  # gateway target must exist before the harness resolves it
+    Properties:
+      HarnessName: !Sub "${ApplicationName}_${Environment}_inspirational"  # HarnessName forces replacement on change
+      ExecutionRoleArn: !Ref HarnessExecutionRoleArn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref FoundationModelId
+          ApiFormat: converse_stream
+      SystemPrompt:
+        - Text: "You are an uplifting assistant. When asked for inspiration or motivation, use the get_inspirational_note tool to retrieve a note and present it warmly to the user."
+      Tools:
+        - Type: agentcore_gateway
+          Name: inspirational-gateway
+          Config:
+            AgentCoreGateway:
+              GatewayArn: !GetAtt Gateway.GatewayArn
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
+      Truncation:
+        Strategy: sliding_window
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+  LambdaArn:
+    Value: !GetAtt InspirationalNoteFunction.Arn
+  HarnessArn:
+    Value: !GetAtt Harness.Arn
+  HarnessId:
+    Value: !GetAtt Harness.HarnessId
+  RuntimeArn:
+    Value: !GetAtt Harness.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
