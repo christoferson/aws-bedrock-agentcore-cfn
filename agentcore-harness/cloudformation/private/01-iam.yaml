@@ -1,7 +1,7 @@
 # Stack 1/3 (private) — IAM. Deploy first; harness stack consumes HarnessExecutionRoleArn.
 # Source for permissions: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/harness-security.html
 AWSTemplateFormatVersion: "2010-09-09"
-Description: IAM role — HarnessExecutionRole for VPC-mode harness
+Description: IAM roles — HarnessExecutionRole and GatewayRole for VPC-mode harness
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -133,6 +133,35 @@ Resources:
                   - bedrock-agentcore:InvokeCodeInterpreter
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:aws:code-interpreter/*"
 
+              # Gateway invocation — required when any agentcore_gateway tool is wired to the Harness
+              - Sid: InvokeGateway
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*"
+
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Gateway role (assumed by AgentCore Gateway when calling Lambda or connector targets) ---
+  # Per-stack Lambda ARN permissions are added as inline policies in each harness stack
+  # (AWS::IAM::RolePolicy) so this role stays minimal here and is extended only when needed.
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-gateway-vpc-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Tags:
         - Key: Application
           Value: !Ref ApplicationName
@@ -142,3 +171,5 @@ Resources:
 Outputs:
   HarnessExecutionRoleArn:
     Value: !GetAtt HarnessExecutionRole.Arn
+  GatewayRoleArn:
+    Value: !GetAtt GatewayRole.Arn
