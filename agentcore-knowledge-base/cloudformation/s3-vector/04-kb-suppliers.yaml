@@ -1,0 +1,157 @@
+# Stack 3/4 (s3-vector) — Suppliers knowledge base using the suppliers S3 Vectors bucket.
+# Deploy after 02-vectorbuckets. Can be deployed in parallel with 03-kb-products.
+#
+# Post-deploy steps:
+#   1. Upload supplier documents to the S3 documents bucket:
+#        aws s3 cp ./suppliers/ s3://<DocumentsBucketName>/suppliers/ --recursive
+#   2. Start ingestion:
+#        aws bedrock-agent start-ingestion-job \
+#          --knowledge-base-id <KnowledgeBaseId> \
+#          --data-source-id <DataSourceId>
+#   3. Check ingestion status:
+#        aws bedrock-agent get-ingestion-job \
+#          --knowledge-base-id <KnowledgeBaseId> \
+#          --data-source-id <DataSourceId> \
+#          --ingestion-job-id <IngestionJobId>
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Suppliers knowledge base — S3 Vectors + S3 data source
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: Vector buckets (from stack 02-vectorbuckets)
+        Parameters:
+          - KnowledgeBaseRoleArn
+          - SuppliersVectorBucketArn
+      - Label:
+          default: Embedding model
+        Parameters:
+          - EmbeddingModelId
+      - Label:
+          default: Chunking
+        Parameters:
+          - ChunkMaxTokens
+          - ChunkOverlapPercentage
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      KnowledgeBaseRoleArn:
+        default: Knowledge base role ARN (02-vectorbuckets output)
+      SuppliersVectorBucketArn:
+        default: Suppliers vector bucket ARN (02-vectorbuckets output)
+      EmbeddingModelId:
+        default: Bedrock embedding model ID
+      ChunkMaxTokens:
+        default: Max tokens per chunk
+      ChunkOverlapPercentage:
+        default: Chunk overlap percentage (0–99)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  KnowledgeBaseRoleArn:
+    Type: String
+    Description: KnowledgeBaseRoleArn from stack 02-vectorbuckets
+  SuppliersVectorBucketArn:
+    Type: String
+    Description: SuppliersVectorBucketArn from stack 02-vectorbuckets
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    # amazon.titan-embed-text-v2:0 — 1024 dims, balanced for English supplier text
+    # cohere.embed-english-v3       — 1024 dims, strong retrieval accuracy
+    # cohere.embed-multilingual-v3  — 1024 dims, use if suppliers are international
+  ChunkMaxTokens:
+    Type: Number
+    Default: 512
+    MinValue: 20
+    MaxValue: 8192
+  ChunkOverlapPercentage:
+    Type: Number
+    Default: 20
+    MinValue: 0
+    MaxValue: 99
+
+Resources:
+
+  # --- S3 bucket for raw supplier documents ---
+  SuppliersDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ApplicationName}-${Environment}-suppliers-documents"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Bedrock Knowledge Base (S3 Vectors backend) ---
+  SuppliersKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-suppliers"
+      Description: Supplier directory — contacts, certifications, lead times, and contract terms
+      RoleArn: !Ref KnowledgeBaseRoleArn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+      StorageConfiguration:
+        Type: S3_VECTORS
+        S3VectorsConfiguration:
+          VectorBucketArn: !Ref SuppliersVectorBucketArn
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- Data source ---
+  SuppliersDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref SuppliersKnowledgeBase
+      Name: !Sub "${ApplicationName}-${Environment}-suppliers-s3"
+      Description: Supplier documents from S3
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt SuppliersDocumentsBucket.Arn
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: !Ref ChunkMaxTokens
+            OverlapPercentage: !Ref ChunkOverlapPercentage
+
+Outputs:
+  KnowledgeBaseId:
+    Value: !Ref SuppliersKnowledgeBase
+  KnowledgeBaseArn:
+    Value: !GetAtt SuppliersKnowledgeBase.KnowledgeBaseArn
+  DataSourceId:
+    Value: !GetAtt SuppliersDataSource.DataSourceId
+  DocumentsBucketName:
+    Value: !Ref SuppliersDocumentsBucket

@@ -1,0 +1,127 @@
+# Stack 4/4 (s3-vector) — AgentCore Gateway + GatewayRole wiring both knowledge bases.
+# Deploy after 03-kb-products and 04-kb-suppliers.
+# Identical in structure to opensearch/05-gateway.yaml — the Gateway connector is storage-backend agnostic.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Gateway with products and suppliers knowledge base connector
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: Knowledge bases
+        Parameters:
+          - ProductsKnowledgeBaseId
+          - SuppliersKnowledgeBaseId
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      ProductsKnowledgeBaseId:
+        default: Products knowledge base ID (03-kb-products output)
+      SuppliersKnowledgeBaseId:
+        default: Suppliers knowledge base ID (04-kb-suppliers output)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  ProductsKnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId from stack 03-kb-products
+  SuppliersKnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId from stack 04-kb-suppliers
+
+Resources:
+
+  # --- Role assumed by AgentCore Gateway when querying knowledge bases ---
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-kb-gateway-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: GatewayKnowledgeBasePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RetrieveFromKnowledgeBases
+                Effect: Allow
+                Action: [bedrock:Retrieve, bedrock:GetKnowledgeBase]
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+              - Sid: AgenticRetrieve
+                Effect: Allow
+                Action: bedrock:AgenticRetrieveStream
+                Resource: "*"
+
+  # --- Gateway (AWS_IAM — callers sign requests with SigV4) ---
+  KnowledgeBaseGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-kb-gateway"
+      RoleArn: !GetAtt GatewayRole.Arn
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      Description: !Sub "${ApplicationName} ${Environment} knowledge base gateway"
+      Tags:
+        Application: !Ref ApplicationName  # Gateway Tags is a flat Object of String (not Array of Tag)
+        Environment: !Ref Environment
+
+  # --- Knowledge base connector target ---
+  KnowledgeBaseTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt KnowledgeBaseGateway.GatewayIdentifier
+      Name: kb-retrieval
+      Description: Products and suppliers knowledge base retrieval
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            Source:
+              ConnectorId: bedrock-knowledge-bases
+            Configurations:
+              - Name: AgenticRetrieveStream
+                ParameterValues:
+                  retrievers:
+                    - description: "Product catalog — specifications, pricing, availability, and feature details"
+                      configuration:
+                        knowledgeBase:
+                          knowledgeBaseId: !Ref ProductsKnowledgeBaseId
+                    - description: "Supplier directory — contacts, certifications, lead times, and contract terms"
+                      configuration:
+                        knowledgeBase:
+                          knowledgeBaseId: !Ref SuppliersKnowledgeBaseId
+                  agenticRetrieveConfiguration:
+                    foundationModelType: MANAGED
+                    rerankingModelType: MANAGED
+              - Name: Retrieve
+                ParameterValues:
+                  knowledgeBaseId: !Ref ProductsKnowledgeBaseId
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayArn
+  GatewayUrl:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayUrl
+  GatewayIdentifier:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayIdentifier

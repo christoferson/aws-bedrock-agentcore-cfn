@@ -1,0 +1,158 @@
+# Stack 2/4 (s3-vector) — Products knowledge base using the products S3 Vectors bucket.
+# Deploy after 02-vectorbuckets.
+#
+# Post-deploy steps:
+#   1. Upload product documents to the S3 documents bucket:
+#        aws s3 cp ./products/ s3://<DocumentsBucketName>/products/ --recursive
+#   2. Start ingestion:
+#        aws bedrock-agent start-ingestion-job \
+#          --knowledge-base-id <KnowledgeBaseId> \
+#          --data-source-id <DataSourceId>
+#   3. Check ingestion status:
+#        aws bedrock-agent get-ingestion-job \
+#          --knowledge-base-id <KnowledgeBaseId> \
+#          --data-source-id <DataSourceId> \
+#          --ingestion-job-id <IngestionJobId>
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Products knowledge base — S3 Vectors + S3 data source
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: Vector buckets (from stack 02-vectorbuckets)
+        Parameters:
+          - KnowledgeBaseRoleArn
+          - ProductsVectorBucketArn
+      - Label:
+          default: Embedding model
+        Parameters:
+          - EmbeddingModelId
+      - Label:
+          default: Chunking
+        Parameters:
+          - ChunkMaxTokens
+          - ChunkOverlapPercentage
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      KnowledgeBaseRoleArn:
+        default: Knowledge base role ARN (02-vectorbuckets output)
+      ProductsVectorBucketArn:
+        default: Products vector bucket ARN (02-vectorbuckets output)
+      EmbeddingModelId:
+        default: Bedrock embedding model ID
+      ChunkMaxTokens:
+        default: Max tokens per chunk
+      ChunkOverlapPercentage:
+        default: Chunk overlap percentage (0–99)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  KnowledgeBaseRoleArn:
+    Type: String
+    Description: KnowledgeBaseRoleArn from stack 02-vectorbuckets
+  ProductsVectorBucketArn:
+    Type: String
+    Description: ProductsVectorBucketArn from stack 02-vectorbuckets
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.titan-embed-text-v2:0
+    # amazon.titan-embed-text-v2:0 — 1024 dims, balanced for English product text
+    # cohere.embed-english-v3       — 1024 dims, strong retrieval accuracy
+    # cohere.embed-multilingual-v3  — 1024 dims, use if content is multilingual
+  ChunkMaxTokens:
+    Type: Number
+    Default: 512
+    MinValue: 20
+    MaxValue: 8192
+  ChunkOverlapPercentage:
+    Type: Number
+    Default: 20
+    MinValue: 0
+    MaxValue: 99
+
+Resources:
+
+  # --- S3 bucket for raw product documents ---
+  ProductsDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ApplicationName}-${Environment}-products-documents"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Bedrock Knowledge Base (S3 Vectors backend) ---
+  # Bedrock creates and manages the vector index inside the S3 Vectors bucket automatically.
+  ProductsKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-products"
+      Description: Product catalog — specifications, pricing, availability, and feature details
+      RoleArn: !Ref KnowledgeBaseRoleArn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}"
+      StorageConfiguration:
+        Type: S3_VECTORS
+        S3VectorsConfiguration:
+          VectorBucketArn: !Ref ProductsVectorBucketArn
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- Data source ---
+  ProductsDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref ProductsKnowledgeBase
+      Name: !Sub "${ApplicationName}-${Environment}-products-s3"
+      Description: Product documents from S3
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt ProductsDocumentsBucket.Arn
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: !Ref ChunkMaxTokens
+            OverlapPercentage: !Ref ChunkOverlapPercentage
+
+Outputs:
+  KnowledgeBaseId:
+    Value: !Ref ProductsKnowledgeBase
+  KnowledgeBaseArn:
+    Value: !GetAtt ProductsKnowledgeBase.KnowledgeBaseArn
+  DataSourceId:
+    Value: !GetAtt ProductsDataSource.DataSourceId
+  DocumentsBucketName:
+    Value: !Ref ProductsDocumentsBucket

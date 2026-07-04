@@ -1,0 +1,173 @@
+# Stack 5/5 (s3-vector) — AgentCore Harness wired to the knowledge base gateway.
+# Deploy after 05-gateway. Pass GatewayArn from stack 05 output.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Harness invoking products and suppliers knowledge base via Gateway
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: Gateway (from stack 05-gateway)
+        Parameters:
+          - GatewayArn
+      - Label:
+          default: Agent configuration
+        Parameters:
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
+          - AgentTemperature
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      GatewayArn:
+        default: Knowledge base gateway ARN (05-gateway output)
+      FoundationModelId:
+        default: Bedrock model ID
+      AgentMaxIterations:
+        default: Max agent loop iterations per invocation
+      AgentTimeoutSeconds:
+        default: Max duration per invocation (seconds)
+      AgentTemperature:
+        default: Model temperature (0–1)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  GatewayArn:
+    Type: String
+    Description: GatewayArn from stack 05-gateway
+  FoundationModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+  AgentMaxIterations:
+    Type: Number
+    Default: 10
+  AgentTimeoutSeconds:
+    Type: Number
+    Default: 300
+  AgentTemperature:
+    Type: Number
+    Default: 0.1
+    MinValue: 0
+    MaxValue: 1
+
+Resources:
+
+  # --- Harness execution role ---
+  HarnessExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-kb-harness-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: HarnessPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BedrockModels
+                Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - arn:aws:bedrock:*::foundation-model/*
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
+              - Sid: EcrPublicToken
+                Effect: Allow
+                Action: ecr-public:GetAuthorizationToken
+                Resource: "*"
+              - Sid: StsEcrPublicBearer
+                Effect: Allow
+                Action: sts:GetServiceBearerToken
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    sts:AWSServiceName: public.ecr.aws
+              - Sid: XRay
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                Resource: "*"
+              - Sid: CloudWatchLogsGroup
+                Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*"
+              - Sid: CloudWatchLogsDescribe
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+              - Sid: CloudWatchLogsStream
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*:log-stream:*"
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: bedrock-agentcore
+              - Sid: MemoryEvents
+                # Required by Harness at runtime even without explicit Memory config
+                Effect: Allow
+                Action: [bedrock-agentcore:CreateEvent, bedrock-agentcore:GetEvent, bedrock-agentcore:ListEvents, bedrock-agentcore:DeleteEvent]
+                Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/*"
+              - Sid: InvokeGateway
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway
+                Resource: !Ref GatewayArn
+
+  # --- Harness wired to the knowledge base gateway ---
+  Harness:
+    Type: AWS::BedrockAgentCore::Harness
+    Properties:
+      HarnessName: !Sub "${ApplicationName}_${Environment}_kb"  # HarnessName forces replacement on change
+      ExecutionRoleArn: !GetAtt HarnessExecutionRole.Arn
+      Model:
+        BedrockModelConfig:
+          ModelId: !Ref FoundationModelId
+          ApiFormat: converse_stream
+          Temperature: !Ref AgentTemperature
+      SystemPrompt:
+        - Text: "You are a knowledgeable assistant with access to a product catalog and supplier directory. Use the available tools to answer questions about products, specifications, pricing, availability, suppliers, certifications, and lead times. Always retrieve information before answering — do not rely on general knowledge for product or supplier details."
+      Tools:
+        - Type: agentcore_gateway
+          Name: kb-gateway
+          Config:
+            AgentCoreGateway:
+              GatewayArn: !Ref GatewayArn
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
+      Truncation:
+        Strategy: sliding_window
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  HarnessArn:
+    Value: !GetAtt Harness.Arn
+  HarnessId:
+    Value: !GetAtt Harness.HarnessId
+  RuntimeArn:
+    Value: !GetAtt Harness.Environment.AgentCoreRuntimeEnvironment.AgentRuntimeArn
