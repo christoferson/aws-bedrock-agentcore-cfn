@@ -1,0 +1,132 @@
+# Stack 4/5 (managed-agentic) — AgentCore Gateway exposing AgenticRetrieveStream.
+# Deploy after 02-kb-products and 03-kb-suppliers.
+# Pass KnowledgeBaseId outputs from stacks 02 and 03, and GatewayRoleArn from 01-iam.
+#
+# =========================================================================
+# VARIANT: managed-agentic
+# =========================================================================
+# One target exposing ONE tool: AgenticRetrieveStream, spanning BOTH KBs.
+#
+# How it behaves:
+#   The harness sees a single tool `kb-retrieval___AgenticRetrieveStream`.
+#   When called, a Bedrock-MANAGED LLM (foundationModelType: MANAGED) runs its
+#   OWN agent loop inside the tool call: it plans a retrieval strategy, decides
+#   which KB(s) to query, issues multi-hop queries, re-ranks, and returns a
+#   synthesized, citation-backed answer — all in one tool call.
+#
+# Cost / control tradeoff:
+#   This is an agent-inside-an-agent. Because the harness is ALREADY an agentic
+#   loop, AgenticRetrieveStream adds a second reasoning LLM (extra latency + tokens)
+#   and hands retrieval planning to the managed model. It shines when the CALLER is
+#   NOT itself an agent (e.g. a thin app wanting a finished cited answer in one shot),
+#   or for broad/multi-part questions spanning both KBs.
+#
+#   If you want cheaper, harness-controlled retrieval, deploy the managed-retrieve
+#   variant instead (plain Retrieve, one target per KB, no nested LLM).
+# =========================================================================
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Gateway — managed KB agentic retrieval (AgenticRetrieveStream)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - GatewayRoleArn
+      - Label:
+          default: Knowledge bases
+        Parameters:
+          - ProductsKnowledgeBaseId
+          - SuppliersKnowledgeBaseId
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      GatewayRoleArn:
+        default: Gateway role ARN (01-iam output)
+      ProductsKnowledgeBaseId:
+        default: Products knowledge base ID (02-kb-products output)
+      SuppliersKnowledgeBaseId:
+        default: Suppliers knowledge base ID (03-kb-suppliers output)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  GatewayRoleArn:
+    Type: String
+    Description: GatewayRoleArn from stack 01-iam
+  ProductsKnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId from stack 02-kb-products
+  SuppliersKnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId from stack 03-kb-suppliers
+
+Resources:
+
+  # --- Gateway (AWS_IAM — callers sign requests with SigV4) ---
+  KnowledgeBaseGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-managed-kb-gateway"
+      RoleArn: !Ref GatewayRoleArn
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      Description: !Sub "${ApplicationName} ${Environment} managed KB gateway (agentic)"
+      # SearchType: SEMANTIC is for TOOL DISCOVERY (filtering a large tool list via
+      # embeddings). With a single tool here it has no effect — left off intentionally.
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- Single target: AgenticRetrieveStream spanning both KBs ---
+  # The agent passes only messages{}; the retrievers below are admin-configured
+  # and the managed LLM decides which KB(s) to query per request.
+  KnowledgeBaseTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt KnowledgeBaseGateway.GatewayIdentifier
+      Name: kb-retrieval
+      Description: Agentic retrieval across products and suppliers knowledge bases
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            Source:
+              ConnectorId: bedrock-knowledge-bases
+            Configurations:
+              - Name: AgenticRetrieveStream
+                ParameterValues:
+                  retrievers:
+                    - description: "Product catalog — specifications, pricing, availability, and feature details"
+                      configuration:
+                        knowledgeBase:
+                          knowledgeBaseId: !Ref ProductsKnowledgeBaseId
+                    - description: "Supplier directory — contacts, certifications, lead times, and contract terms"
+                      configuration:
+                        knowledgeBase:
+                          knowledgeBaseId: !Ref SuppliersKnowledgeBaseId
+                  agenticRetrieveConfiguration:
+                    foundationModelType: MANAGED    # service-managed planning LLM (no ARN to supply)
+                    rerankingModelType: MANAGED      # service-managed reranker (free)
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayArn
+  GatewayUrl:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayUrl
+  GatewayIdentifier:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayIdentifier
