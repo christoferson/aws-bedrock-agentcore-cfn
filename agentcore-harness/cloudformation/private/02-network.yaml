@@ -142,15 +142,15 @@ Resources:
   # Uncomment to provision them here, or add them to your existing VPC separately.
 
   # Bedrock model inference (bedrock:InvokeModel, InvokeModelWithResponseStream)
-  # BedrockRuntimeEndpoint:
-  #   Type: AWS::EC2::VPCEndpoint
-  #   Properties:
-  #     VpcId: !Ref VpcId
-  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
-  #     VpcEndpointType: Interface
-  #     SubnetIds: !Ref PrivateSubnetIds
-  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
-  #     PrivateDnsEnabled: true
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
 
   # ECR — container image pull API calls
   # EcrApiEndpoint:

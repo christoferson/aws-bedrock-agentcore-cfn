@@ -23,8 +23,8 @@ Parameters:
     Default: coreagent
   Environment:
     Type: String
-    Default: dev
-    AllowedValues: [dev, stg, prd]
+    Default: pub
+    AllowedValues: [pub, dev, stg, prd]
 
 Resources:
 

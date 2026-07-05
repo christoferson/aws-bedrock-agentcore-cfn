@@ -1,6 +1,6 @@
-# Harness — no tools. Model + system prompt only. Simplest starting point.
+# 04-harness-with-tools-builtin-codeinterpreter — built-in AgentCore Code Interpreter. No custom container or interpreter resource needed.
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AgentCore Harness — basic, model and system prompt only, no tools
+Description: AgentCore Harness with built-in agentcore_code_interpreter tool
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -17,9 +17,9 @@ Metadata:
       - Label:
           default: Agent configuration
         Parameters:
-          - ModelId
-          - MaxIterations
-          - TimeoutSeconds
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
     ParameterLabels:
       ApplicationName:
         default: Application name prefix
@@ -27,11 +27,11 @@ Metadata:
         default: Deployment environment (dev / stg / prd)
       HarnessExecutionRoleArn:
         default: Harness execution role ARN (01-iam output)
-      ModelId:
+      FoundationModelId:
         default: Bedrock model ID
-      MaxIterations:
+      AgentMaxIterations:
         default: Max agent loop iterations per invocation
-      TimeoutSeconds:
+      AgentTimeoutSeconds:
         default: Max duration per invocation (seconds)
 
 Parameters:
@@ -45,32 +45,37 @@ Parameters:
   HarnessExecutionRoleArn:
     Type: String
     Description: HarnessExecutionRoleArn from stack 01-iam
-  ModelId:
+  FoundationModelId:
     Type: String
     Default: global.anthropic.claude-sonnet-4-6
-  MaxIterations:
+  AgentMaxIterations:
     Type: Number
     Default: 10
-  TimeoutSeconds:
+  AgentTimeoutSeconds:
     Type: Number
     Default: 300
 
 Resources:
 
-  # --- Harness (no tools — model answers from its own knowledge only) ---
+  # --- Harness with the built-in AgentCore Code Interpreter tool ---
   Harness:
     Type: AWS::BedrockAgentCore::Harness
     Properties:
-      HarnessName: !Sub "${ApplicationName}_${Environment}_basic"  # HarnessName forces replacement on change
+      HarnessName: !Sub "${ApplicationName}_${Environment}_codeinterpreter"  # HarnessName forces replacement on change
       ExecutionRoleArn: !Ref HarnessExecutionRoleArn
       Model:
         BedrockModelConfig:
-          ModelId: !Ref ModelId
+          ModelId: !Ref FoundationModelId
           ApiFormat: converse_stream  # streaming converse API; preferred for low-latency responses
       SystemPrompt:
-        - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment."
-      MaxIterations: !Ref MaxIterations
-      TimeoutSeconds: !Ref TimeoutSeconds
+        - Text: "You are a helpful data analysis assistant. You can write and execute code to analyze data and solve problems."
+      Tools:
+        - Type: agentcore_code_interpreter
+          Name: code_interpreter
+          Config:
+            AgentCoreCodeInterpreter: {}  # CodeInterpreterArn omitted — service uses the built-in aws.codeinterpreter.v1 automatically
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
       Truncation:
         Strategy: sliding_window  # drops oldest messages when context limit is approached
       Tags:
