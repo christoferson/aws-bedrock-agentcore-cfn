@@ -74,9 +74,21 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 
   # --- Lambda — inspirational note generator ---
-  # Implements MCP tools/list + tools/call contract.
-  # Tool: get_inspirational_note(theme?, mood?)
-  # Returns a randomly selected note from a curated collection across multiple themes.
+  #
+  # Gateway Lambda invocation contract (aggregated mode — the only mode):
+  #   Gateway handles tools/list itself from the registered InlinePayload schema.
+  #   The Lambda is only invoked for tool execution, never for tools/list.
+  #
+  #   event  = flat map of tool arguments directly, e.g. {"theme": "courage", "mood": "stuck"}
+  #            No MCP envelope. Access arguments as event.get("theme"), event.get("mood"), etc.
+  #
+  #   context.client_context.custom["bedrockAgentCoreToolName"]
+  #            = "{targetName}___{toolName}" (triple underscore separator)
+  #            Strip the prefix: toolName = full.split("___")[-1]
+  #
+  #   Return: {"content": [{"type": "text", "text": "<result>"}], "isError": False}
+  #
+  # Source: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-lambda.html
   InspirationalNoteFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -88,7 +100,10 @@ Resources:
       Timeout: 10
       Code:
         ZipFile: |
-          import json, random
+          import json, logging, random
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
 
           NOTES = {
               "resilience": [
@@ -130,25 +145,6 @@ Resources:
 
           ALL_THEMES = list(NOTES.keys())
 
-          TOOL_DEF = {
-              "name": "get_inspirational_note",
-              "description": "Returns a random inspirational note, optionally filtered by theme or mood.",
-              "inputSchema": {
-                  "type": "object",
-                  "properties": {
-                      "theme": {
-                          "type": "string",
-                          "description": f"Optional theme filter: {', '.join(ALL_THEMES)}. Omit for a random theme.",
-                      },
-                      "mood": {
-                          "type": "string",
-                          "description": "Optional free-text mood or context hint (e.g. 'feeling stuck', 'starting something new'). Used to pick a fitting theme when no explicit theme is given.",
-                      },
-                  },
-                  "required": [],
-              },
-          }
-
           MOOD_THEME_HINTS = {
               "stuck":   "resilience",
               "tired":   "resilience",
@@ -172,18 +168,40 @@ Resources:
               return random.choice(ALL_THEMES)
 
           def handler(event, context):
-              method = event.get("method", "")
-              if method == "tools/list":
-                  return {"tools": [TOOL_DEF]}
-              if method == "tools/call":
-                  args   = event.get("params", {}).get("arguments", {})
-                  theme  = args.get("theme", "")
-                  mood   = args.get("mood", "")
+              logger.info("RAW EVENT: %s", json.dumps(event, default=str))
+
+              # Gateway (MCP Lambda target, aggregated mode) passes event = arguments dict directly.
+              # Tool name and metadata arrive in context.client_context.custom, not in event.
+              # Gateway handles tools/list itself from the registered schema — no branch needed here.
+              custom = {}
+              if getattr(context, "client_context", None):
+                  custom = context.client_context.custom or {}
+              logger.info("CLIENT CONTEXT CUSTOM: %s", custom)
+
+              # Tool name is namespaced as "{targetName}___{toolName}" — take the last segment.
+              full_tool_name = custom.get("bedrockAgentCoreToolName", "")
+              tool_name = full_tool_name.split("___")[-1] if full_tool_name else ""
+              logger.info("Tool invoked: %s (raw: %s)", tool_name, full_tool_name)
+
+              if not isinstance(event, dict):
+                  logger.error("Unexpected event type: %r", event)
+                  return {"content": [{"type": "text", "text": "invalid arguments"}], "isError": True}
+
+              if tool_name and tool_name != "get_inspirational_note":
+                  logger.warning("Unknown tool name requested: %s", tool_name)
+                  return {"content": [{"type": "text", "text": f"unknown tool: {tool_name}"}], "isError": True}
+
+              try:
+                  theme  = event.get("theme", "")
+                  mood   = event.get("mood", "")
                   chosen = resolve_theme(theme, mood)
                   note   = random.choice(NOTES[chosen])
                   result = {"note": note, "theme": chosen}
+                  logger.info("Result: %s", json.dumps(result))
                   return {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False}
-              return {"content": [{"type": "text", "text": "unknown method"}], "isError": True}
+              except Exception:
+                  logger.exception("Handler failed")
+                  return {"content": [{"type": "text", "text": "internal error"}], "isError": True}
       Tags:
         - Key: Application
           Value: !Ref ApplicationName
