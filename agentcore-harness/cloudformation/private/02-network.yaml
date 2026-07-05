@@ -1,7 +1,12 @@
 # Stack 2/3 (private) — AgentCore/Bedrock VPC endpoints and security groups only.
 # Assumes an existing VPC with private subnets that already have NAT or internet access.
-# ECR Public (public.ecr.aws) has no VPC endpoint — the existing NAT/internet path is required
-# for Harness managed container pulls. See aws-documentation/agentcore-vpc.md for details.
+#
+# IMPORTANT — ECR Public and NAT Gateway requirement:
+#   The Harness pulls its application container from Amazon ECR Public (public.ecr.aws)
+#   at the start of each session. When running in VPC mode, your VPC must allow outbound
+#   access to public.ecr.aws. Amazon ECR Public does not support VPC endpoints, so your
+#   VPC must have a NAT gateway with a route to an internet gateway. If this connectivity
+#   is not available, sessions will fail to start due to image pull timeouts.
 #
 # NOTE: An S3 Gateway endpoint (com.amazonaws.{region}.s3) is also recommended to avoid
 # NAT charges for ECR private layer pulls, but it requires a private route table ID as input.
@@ -87,7 +92,11 @@ Resources:
           Value: !Sub "${ApplicationName}-${Environment}-harness-sg"
 
   # =========================================================================
-  # VPC Interface Endpoints — private DNS enabled; traffic stays off NAT GW
+  # VPC Interface Endpoints
+  # Three separate AgentCore endpoints — each covers a different service domain:
+  #   bedrock-agentcore         — data plane (Runtime, Memory, Browser, Code Interpreter)
+  #   bedrock-agentcore.gateway — Gateway data plane (Harness → Gateway tool calls)
+  #   bedrock-agentcore-control — control plane (create/update/delete resources)
   # =========================================================================
 
   # AgentCore data plane: Runtime invoke, Memory events, Built-in Tools, Identity
@@ -96,6 +105,23 @@ Resources:
     Properties:
       VpcId: !Ref VpcId
       ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-agentcore"
+      VpcEndpointType: Interface
+      SubnetIds: !Ref PrivateSubnetIds
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  # AgentCore Gateway data plane: required for Harness → Gateway tool calls from inside VPC.
+  # This is a SEPARATE endpoint from bedrock-agentcore (data plane).
+  # Service name: com.amazonaws.{region}.bedrock-agentcore.gateway
+  # PrivateDnsEnabled: true is correct and safe here — its private hosted zone covers
+  # the gateway subdomain only; it does NOT conflict with the data plane zone.
+  # Without this endpoint, Harness ENIs in private subnets have no route to the Gateway
+  # URL and every agentcore_gateway tool fails with [Errno -2] Name or service not known.
+  BedrockAgentCoreGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-agentcore.gateway"
       VpcEndpointType: Interface
       SubnetIds: !Ref PrivateSubnetIds
       SecurityGroupIds: [!Ref EndpointSecurityGroup]
@@ -187,6 +213,20 @@ Resources:
   #   Properties:
   #     VpcId: !Ref VpcId
   #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+  #     VpcEndpointType: Interface
+  #     SubnetIds: !Ref PrivateSubnetIds
+  #     SecurityGroupIds: [!Ref EndpointSecurityGroup]
+  #     PrivateDnsEnabled: true
+
+  # Lambda — allows Gateway to invoke Lambda functions without traversing NAT.
+  # Relevant when the Lambda target itself is NOT VPC-enabled (Lambda VPC-enabled functions
+  # are invoked by Gateway directly; this endpoint helps when Lambda is public but you want
+  # Gateway→Lambda traffic to stay on the AWS backbone).
+  # LambdaEndpoint:
+  #   Type: AWS::EC2::VPCEndpoint
+  #   Properties:
+  #     VpcId: !Ref VpcId
+  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.lambda"
   #     VpcEndpointType: Interface
   #     SubnetIds: !Ref PrivateSubnetIds
   #     SecurityGroupIds: [!Ref EndpointSecurityGroup]

@@ -42,8 +42,8 @@ Parameters:
     Default: coreagent
   Environment:
     Type: String
-    Default: dev
-    AllowedValues: [dev, stg, prd]
+    Default: pub
+    AllowedValues: [pub, dev, stg, prd]
   HarnessExecutionRoleArn:
     Type: String
     Description: HarnessExecutionRoleArn from stack 01-iam
@@ -249,6 +249,9 @@ Resources:
       AuthorizerType: AWS_IAM
       ProtocolType: MCP
       Description: !Sub "${ApplicationName} ${Environment} inspirational note gateway"
+      # ProtocolConfiguration:
+      #   Mcp:
+      #     SearchType: SEMANTIC  # enable embedding-based tool discovery (recommended when gateway has many tools)
       Tags:
         Application: !Ref ApplicationName  # Gateway Tags is a flat Object of String (not Array of Tag)
         Environment: !Ref Environment
