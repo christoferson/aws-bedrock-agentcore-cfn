@@ -1,6 +1,10 @@
 # Stack 3/4 (s3-vector) — Suppliers knowledge base using the suppliers S3 Vectors bucket.
 # Deploy after 02-vectorbuckets. Can be deployed in parallel with 03-kb-products.
 #
+# NOTE: Bedrock does NOT auto-create the vector index — you must create AWS::S3Vectors::Index
+# first and supply its IndexArn + IndexName to StorageConfiguration.S3VectorsConfiguration.
+# VectorDimension must match the embedding model output (titan-embed-text-v2:0 = 1024).
+#
 # Post-deploy steps:
 #   1. Upload supplier documents to the S3 documents bucket:
 #        aws s3 cp ./suppliers/ s3://<DocumentsBucketName>/suppliers/ --recursive
@@ -33,6 +37,7 @@ Metadata:
           default: Embedding model
         Parameters:
           - EmbeddingModelId
+          - VectorDimension
       - Label:
           default: Chunking
         Parameters:
@@ -49,6 +54,8 @@ Metadata:
         default: Suppliers vector bucket ARN (02-vectorbuckets output)
       EmbeddingModelId:
         default: Bedrock embedding model ID
+      VectorDimension:
+        default: Embedding output dimension (must match model)
       ChunkMaxTokens:
         default: Max tokens per chunk
       ChunkOverlapPercentage:
@@ -74,6 +81,13 @@ Parameters:
     # amazon.titan-embed-text-v2:0 — 1024 dims, balanced for English supplier text
     # cohere.embed-english-v3       — 1024 dims, strong retrieval accuracy
     # cohere.embed-multilingual-v3  — 1024 dims, use if suppliers are international
+  VectorDimension:
+    Type: Number
+    Default: 1024
+    # Must match the embedding model output dimension:
+    #   amazon.titan-embed-text-v2:0  → 1024 (default)
+    #   cohere.embed-english-v3       → 1024
+    #   cohere.embed-multilingual-v3  → 1024
   ChunkMaxTokens:
     Type: Number
     Default: 512
@@ -109,9 +123,22 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  # --- S3 Vectors index for suppliers KB ---
+  # Bedrock requires a pre-existing index — it does NOT auto-create one.
+  # Dimension must match the embedding model (titan-embed-text-v2:0 = 1024).
+  SuppliersVectorIndex:
+    Type: AWS::S3Vectors::Index
+    Properties:
+      VectorBucketArn: !Ref SuppliersVectorBucketArn
+      IndexName: !Sub "${ApplicationName}-${Environment}-suppliers-index"
+      DataType: float32
+      Dimension: !Ref VectorDimension
+      DistanceMetric: cosine
+
   # --- Bedrock Knowledge Base (S3 Vectors backend) ---
   SuppliersKnowledgeBase:
     Type: AWS::Bedrock::KnowledgeBase
+    DependsOn: SuppliersVectorIndex
     Properties:
       Name: !Sub "${ApplicationName}-${Environment}-suppliers"
       Description: Supplier directory — contacts, certifications, lead times, and contract terms
@@ -124,6 +151,8 @@ Resources:
         Type: S3_VECTORS
         S3VectorsConfiguration:
           VectorBucketArn: !Ref SuppliersVectorBucketArn
+          IndexArn: !GetAtt SuppliersVectorIndex.IndexArn
+          IndexName: !Sub "${ApplicationName}-${Environment}-suppliers-index"
       Tags:
         Application: !Ref ApplicationName
         Environment: !Ref Environment
