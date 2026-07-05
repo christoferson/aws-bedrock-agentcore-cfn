@@ -97,6 +97,6 @@ Outputs:
   KnowledgeBaseRoleArn:
     Value: !GetAtt KnowledgeBaseRole.Arn
   ProductsVectorBucketArn:
-    Value: !GetAtt ProductsVectorBucket.Arn
+    Value: !GetAtt ProductsVectorBucket.VectorBucketArn
   SuppliersVectorBucketArn:
-    Value: !GetAtt SuppliersVectorBucket.Arn
+    Value: !GetAtt SuppliersVectorBucket.VectorBucketArn

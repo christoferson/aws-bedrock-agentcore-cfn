@@ -128,7 +128,12 @@ Resources:
               - Sid: MemoryEvents
                 # Required by Harness at runtime even without explicit Memory config
                 Effect: Allow
-                Action: [bedrock-agentcore:CreateEvent, bedrock-agentcore:GetEvent, bedrock-agentcore:ListEvents, bedrock-agentcore:DeleteEvent]
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:DeleteEvent
+                  - bedrock-agentcore:RetrieveMemoryRecords
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/*"
               - Sid: InvokeGateway
                 Effect: Allow

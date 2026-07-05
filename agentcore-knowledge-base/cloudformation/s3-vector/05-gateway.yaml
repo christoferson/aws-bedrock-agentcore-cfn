@@ -1,4 +1,4 @@
-# Stack 4/4 (s3-vector) — AgentCore Gateway + GatewayRole wiring both knowledge bases.
+# Stack 4/5 (s3-vector) — AgentCore Gateway + GatewayRole wiring both knowledge bases.
 # Deploy after 03-kb-products and 04-kb-suppliers.
 # Identical in structure to opensearch/05-gateway.yaml — the Gateway connector is storage-backend agnostic.
 AWSTemplateFormatVersion: "2010-09-09"
@@ -81,6 +81,9 @@ Resources:
       AuthorizerType: AWS_IAM
       ProtocolType: MCP
       Description: !Sub "${ApplicationName} ${Environment} knowledge base gateway"
+      # ProtocolConfiguration:
+      #   Mcp:
+      #     SearchType: SEMANTIC  # enable embedding-based tool discovery (recommended when gateway has many tools)
       Tags:
         Application: !Ref ApplicationName  # Gateway Tags is a flat Object of String (not Array of Tag)
         Environment: !Ref Environment
