@@ -152,7 +152,6 @@ Resources:
         S3VectorsConfiguration:
           VectorBucketArn: !Ref SuppliersVectorBucketArn
           IndexArn: !GetAtt SuppliersVectorIndex.IndexArn
-          IndexName: !Sub "${ApplicationName}-${Environment}-suppliers-index"
       Tags:
         Application: !Ref ApplicationName
         Environment: !Ref Environment
