@@ -1,0 +1,94 @@
+# Stack 1/5 (managed-retrieve) — IAM roles for the managed knowledge base stack set.
+# Deploy first. Pass KnowledgeBaseRoleArn to stacks 02 and 03, GatewayRoleArn to stack 04.
+#
+# Managed KBs do not need vector store permissions — Bedrock owns the datastore.
+# The KB role only needs S3 read access for ingestion.
+#
+# VARIANT NOTE (managed-retrieve): the GatewayRole grants ONLY Retrieve +
+# GetKnowledgeBase — no AgenticRetrieveStream, because 04-gateway exposes only the
+# plain Retrieve tool. This is a strictly smaller permission set than managed-agentic.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM roles for managed knowledge base — plain retrieve variant
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+
+Resources:
+
+  # --- Role assumed by Bedrock during ingestion (reads S3 documents) ---
+  # Managed KB: no vector store permissions needed — Bedrock owns the datastore.
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-managed-kb-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: KnowledgeBasePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3DocumentsRead
+                Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !Sub "arn:aws:s3:::${ApplicationName}-${Environment}-*-documents"
+                  - !Sub "arn:aws:s3:::${ApplicationName}-${Environment}-*-documents/*"
+
+  # --- Role assumed by AgentCore Gateway when querying knowledge bases ---
+  # Retrieve variant: needs only Retrieve + GetKnowledgeBase (no AgenticRetrieveStream).
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-${Environment}-managed-kb-gateway-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: GatewayKnowledgeBasePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RetrieveFromKnowledgeBases
+                Effect: Allow
+                Action: [bedrock:Retrieve, bedrock:GetKnowledgeBase]
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+
+Outputs:
+  KnowledgeBaseRoleArn:
+    Value: !GetAtt KnowledgeBaseRole.Arn
+  GatewayRoleArn:
+    Value: !GetAtt GatewayRole.Arn

@@ -1,0 +1,141 @@
+# Stack 4/5 (managed-retrieve) — AgentCore Gateway exposing plain Retrieve per KB.
+# Deploy after 02-kb-products and 03-kb-suppliers.
+# Pass KnowledgeBaseId outputs from stacks 02 and 03, and GatewayRoleArn from 01-iam.
+#
+# =========================================================================
+# VARIANT: managed-retrieve
+# =========================================================================
+# TWO targets, each exposing ONE Retrieve tool bound to ONE KB.
+#
+# Why two targets (not one target with two Retrieve configs):
+#   The Retrieve tool name is fixed and each Retrieve binds exactly one
+#   knowledgeBaseId. Two Retrieve entries in a single target would collide on the
+#   tool name. GatewayTarget prefixes tool names with the target name, so two
+#   targets yield two distinct tools:
+#     products___Retrieve   (bound to the products KB)
+#     suppliers___Retrieve  (bound to the suppliers KB)
+#
+# How it behaves:
+#   The harness sees the two tools above and picks one by matching the question
+#   to the tool description. Each call is a single hybrid search returning ranked
+#   passages — NO nested LLM. The harness itself reasons over the passages.
+#
+# Cost / control tradeoff:
+#   Cheaper and lower-latency than managed-agentic: no second reasoning LLM, no
+#   agentic planning loop. Retrieval control stays in the harness. Best when the
+#   caller is ALREADY an agent (as the harness is). Downside: no automatic
+#   multi-hop planning or synthesized cited answer — the harness must orchestrate
+#   multiple retrievals itself if a question spans both KBs.
+# =========================================================================
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AgentCore Gateway — managed KB plain retrieval (one Retrieve tool per KB)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - GatewayRoleArn
+      - Label:
+          default: Knowledge bases
+        Parameters:
+          - ProductsKnowledgeBaseId
+          - SuppliersKnowledgeBaseId
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      GatewayRoleArn:
+        default: Gateway role ARN (01-iam output)
+      ProductsKnowledgeBaseId:
+        default: Products knowledge base ID (02-kb-products output)
+      SuppliersKnowledgeBaseId:
+        default: Suppliers knowledge base ID (03-kb-suppliers output)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  GatewayRoleArn:
+    Type: String
+    Description: GatewayRoleArn from stack 01-iam
+  ProductsKnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId from stack 02-kb-products
+  SuppliersKnowledgeBaseId:
+    Type: String
+    Description: KnowledgeBaseId from stack 03-kb-suppliers
+
+Resources:
+
+  # --- Gateway (AWS_IAM — callers sign requests with SigV4) ---
+  KnowledgeBaseGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-managed-kb-gateway"
+      RoleArn: !Ref GatewayRoleArn
+      AuthorizerType: AWS_IAM
+      ProtocolType: MCP
+      Description: !Sub "${ApplicationName} ${Environment} managed KB gateway (retrieve)"
+      # SearchType: SEMANTIC is for TOOL DISCOVERY (filtering a large tool list via
+      # embeddings). With two tools here it has negligible effect — left off.
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- Target 1: products KB → tool products___Retrieve ---
+  ProductsTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt KnowledgeBaseGateway.GatewayIdentifier
+      Name: products
+      Description: Product catalog — specifications, pricing, availability, and feature details
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            Source:
+              ConnectorId: bedrock-knowledge-bases
+            Configurations:
+              - Name: Retrieve
+                ParameterValues:
+                  knowledgeBaseId: !Ref ProductsKnowledgeBaseId
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+  # --- Target 2: suppliers KB → tool suppliers___Retrieve ---
+  SuppliersTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt KnowledgeBaseGateway.GatewayIdentifier
+      Name: suppliers
+      Description: Supplier directory — contacts, certifications, lead times, and contract terms
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            Source:
+              ConnectorId: bedrock-knowledge-bases
+            Configurations:
+              - Name: Retrieve
+                ParameterValues:
+                  knowledgeBaseId: !Ref SuppliersKnowledgeBaseId
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+
+Outputs:
+  GatewayArn:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayArn
+  GatewayUrl:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayUrl
+  GatewayIdentifier:
+    Value: !GetAtt KnowledgeBaseGateway.GatewayIdentifier

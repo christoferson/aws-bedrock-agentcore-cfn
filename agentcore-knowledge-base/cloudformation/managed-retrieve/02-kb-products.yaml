@@ -1,0 +1,159 @@
+# Stack 2/5 (managed-retrieve) — Products knowledge base (fully managed by Bedrock).
+# Deploy after 01-iam. Can be deployed in parallel with 03-kb-suppliers.
+#
+# IDENTICAL to managed-agentic/02-kb-products.yaml — the KB itself is the same
+# regardless of which retrieval API the gateway later exposes. Only 01-iam and
+# 04-gateway differ between the two variants.
+#
+# Bedrock manages the vector store internally — no OpenSearch, S3 Vectors, or
+# other backend to provision. StorageConfiguration is omitted entirely.
+#
+# Chunking strategy is FIXED_SIZE. Cannot be changed after data source creation.
+# Default parsing is SMART_PARSING (only supported option for managed KBs).
+#
+# Post-deploy steps:
+#   1. Upload product documents to the S3 documents bucket:
+#        aws s3 cp ./products/ s3://<DocumentsBucketName>/products/ --recursive
+#   2. Start ingestion:
+#        aws bedrock-agent start-ingestion-job \
+#          --knowledge-base-id <KnowledgeBaseId> \
+#          --data-source-id <DataSourceId>
+#   3. Check ingestion status:
+#        aws bedrock-agent get-ingestion-job \
+#          --knowledge-base-id <KnowledgeBaseId> \
+#          --data-source-id <DataSourceId> \
+#          --ingestion-job-id <IngestionJobId>
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Products knowledge base — Bedrock managed datastore + S3 data source
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - KnowledgeBaseRoleArn
+      - Label:
+          default: Chunking
+        Parameters:
+          - ChunkMaxTokens
+          - ChunkOverlapPercentage
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      KnowledgeBaseRoleArn:
+        default: Knowledge base role ARN (01-iam output)
+      ChunkMaxTokens:
+        default: Max tokens per chunk
+      ChunkOverlapPercentage:
+        default: Chunk overlap percentage (0–99)
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: coreagent
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prd]
+  KnowledgeBaseRoleArn:
+    Type: String
+    Description: KnowledgeBaseRoleArn from stack 01-iam
+  ChunkMaxTokens:
+    Type: Number
+    Default: 512
+    MinValue: 20
+    MaxValue: 8192
+  ChunkOverlapPercentage:
+    Type: Number
+    Default: 20
+    MinValue: 0
+    MaxValue: 99
+
+Resources:
+
+  # --- S3 bucket for raw product documents ---
+  ProductsDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ApplicationName}-${Environment}-products-documents"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # --- Managed knowledge base — Bedrock owns the vector datastore ---
+  # Type: MANAGED — no StorageConfiguration required.
+  # EmbeddingModelType: MANAGED — Bedrock selects and manages the embedding model
+  # at no extra cost. Also enables the managed reranker (free).
+  ProductsKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub "${ApplicationName}-${Environment}-products"
+      Description: Product catalog — specifications, pricing, availability, and feature details
+      RoleArn: !Ref KnowledgeBaseRoleArn
+      KnowledgeBaseConfiguration:
+        Type: MANAGED
+        ManagedKnowledgeBaseConfiguration:
+          EmbeddingModelType: MANAGED
+      Tags:
+        Application: !Ref ApplicationName
+        Environment: !Ref Environment
+
+  # --- Data source (MANAGED_KNOWLEDGE_BASE_CONNECTOR for managed KBs) ---
+  # Managed KBs use Type: MANAGED_KNOWLEDGE_BASE_CONNECTOR, not Type: S3.
+  # ConnectorParameters is a free-form JSON blob; bucket reference goes inside
+  # connectionConfiguration. Chunking is immutable after creation.
+  ProductsDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref ProductsKnowledgeBase
+      Name: !Sub "${ApplicationName}-${Environment}-products-s3"
+      Description: Product documents from S3
+      DataDeletionPolicy: DELETE
+      DataSourceConfiguration:
+        Type: MANAGED_KNOWLEDGE_BASE_CONNECTOR
+        ManagedKnowledgeBaseConnectorConfiguration:
+          ConnectorParameters:
+            type: S3
+            version: "1"
+            connectionConfiguration:
+              bucketName: !Sub "${ApplicationName}-${Environment}-products-documents"
+              bucketOwnerAccountId: !Ref AWS::AccountId
+      VectorIngestionConfiguration:
+        ParsingConfiguration:
+          ParsingStrategy: SMART_PARSING
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: !Ref ChunkMaxTokens
+            OverlapPercentage: !Ref ChunkOverlapPercentage
+
+Outputs:
+  KnowledgeBaseId:
+    Value: !Ref ProductsKnowledgeBase
+  KnowledgeBaseArn:
+    Value: !GetAtt ProductsKnowledgeBase.KnowledgeBaseArn
+  DataSourceId:
+    Value: !GetAtt ProductsDataSource.DataSourceId
+  DocumentsBucketName:
+    Value: !Ref ProductsDocumentsBucket
