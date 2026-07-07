@@ -8,8 +8,12 @@
 # Bedrock manages the vector store internally — no OpenSearch, S3 Vectors, or
 # other backend to provision. StorageConfiguration is omitted entirely.
 #
-# Chunking strategy is FIXED_SIZE. Cannot be changed after data source creation.
-# Default parsing is SMART_PARSING (only supported option for managed KBs).
+# With EmbeddingModelType: MANAGED the service controls chunking — a
+# ChunkingConfiguration is REJECTED ("A chunking strategy cannot be specified
+# with a managed embedding model"). VectorIngestionConfiguration is omitted so
+# Bedrock applies its managed defaults. Parsing is likewise service-managed
+# (SMART_PARSING) and needs no configuration.
+# To customize chunking you must switch to EmbeddingModelType: CUSTOM.
 #
 # Post-deploy steps:
 #   1. Upload product documents to the S3 documents bucket:
@@ -38,11 +42,6 @@ Metadata:
           default: IAM (from stack 01-iam)
         Parameters:
           - KnowledgeBaseRoleArn
-      - Label:
-          default: Chunking
-        Parameters:
-          - ChunkMaxTokens
-          - ChunkOverlapPercentage
     ParameterLabels:
       ApplicationName:
         default: Application name prefix
@@ -50,10 +49,6 @@ Metadata:
         default: Deployment environment (dev / stg / prd)
       KnowledgeBaseRoleArn:
         default: Knowledge base role ARN (01-iam output)
-      ChunkMaxTokens:
-        default: Max tokens per chunk
-      ChunkOverlapPercentage:
-        default: Chunk overlap percentage (0–99)
 
 Parameters:
   ApplicationName:
@@ -66,16 +61,6 @@ Parameters:
   KnowledgeBaseRoleArn:
     Type: String
     Description: KnowledgeBaseRoleArn from stack 01-iam
-  ChunkMaxTokens:
-    Type: Number
-    Default: 512
-    MinValue: 20
-    MaxValue: 8192
-  ChunkOverlapPercentage:
-    Type: Number
-    Default: 20
-    MinValue: 0
-    MaxValue: 99
 
 Resources:
 
@@ -122,7 +107,11 @@ Resources:
   # --- Data source (MANAGED_KNOWLEDGE_BASE_CONNECTOR for managed KBs) ---
   # Managed KBs use Type: MANAGED_KNOWLEDGE_BASE_CONNECTOR, not Type: S3.
   # ConnectorParameters is a free-form JSON blob; bucket reference goes inside
-  # connectionConfiguration. Chunking is immutable after creation.
+  # connectionConfiguration.
+  #
+  # VectorIngestionConfiguration is intentionally omitted: with a managed
+  # embedding model the service rejects a ChunkingConfiguration and manages
+  # chunking + parsing itself. Add it back only under EmbeddingModelType: CUSTOM.
   ProductsDataSource:
     Type: AWS::Bedrock::DataSource
     Properties:
@@ -139,14 +128,6 @@ Resources:
             connectionConfiguration:
               bucketName: !Sub "${ApplicationName}-${Environment}-products-documents"
               bucketOwnerAccountId: !Ref AWS::AccountId
-      VectorIngestionConfiguration:
-        ParsingConfiguration:
-          ParsingStrategy: SMART_PARSING
-        ChunkingConfiguration:
-          ChunkingStrategy: FIXED_SIZE
-          FixedSizeChunkingConfiguration:
-            MaxTokens: !Ref ChunkMaxTokens
-            OverlapPercentage: !Ref ChunkOverlapPercentage
 
 Outputs:
   KnowledgeBaseId:
