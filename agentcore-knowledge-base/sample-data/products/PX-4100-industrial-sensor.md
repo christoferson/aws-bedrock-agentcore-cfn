@@ -5,6 +5,15 @@
 **List price:** USD 249.00 per unit
 **Availability:** In stock (ships in 2 business days)
 
+## Classification
+
+| Attribute | Value |
+|---|---|
+| Category | Industrial Sensors |
+| Primary material | Metal — stainless steel (housing) |
+| Price band | Under USD 500 |
+| Key certification | UL 61010-1 |
+
 ## Overview
 
 The PX-4100 is a ruggedized industrial temperature sensor designed for harsh

@@ -128,6 +128,11 @@ Resources:
             connectionConfiguration:
               bucketName: !Sub "${ApplicationName}-${Environment}-products-documents"
               bucketOwnerAccountId: !Ref AWS::AccountId
+            # Read <filename>.md.metadata.json sidecars from the same prefix as the
+            # documents. Enables metadata filtering at query time (material,
+            # price_band, unit_price, etc.). Managed KBs support equals/notEquals/
+            # greaterThan/lessThan/in/notIn — NOT startsWith or stringContains.
+            metadataFilesPrefix: products/
 
 Outputs:
   KnowledgeBaseId:

@@ -5,6 +5,15 @@
 **List price:** USD 640.00 per module
 **Availability:** In stock (ships in 5 business days)
 
+## Classification
+
+| Attribute | Value |
+|---|---|
+| Category | Energy Storage |
+| Primary material | Non-metal — lithium-iron-phosphate cells |
+| Price band | Over USD 500 |
+| Key certification | UL 1973 |
+
 ## Overview
 
 The LumaCell-9 is a modular lithium-iron-phosphate (LiFePO4) battery pack for

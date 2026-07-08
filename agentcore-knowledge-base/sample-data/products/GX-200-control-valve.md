@@ -5,6 +5,15 @@
 **List price:** USD 1,180.00 per unit
 **Availability:** Made to order (see lead time below)
 
+## Classification
+
+| Attribute | Value |
+|---|---|
+| Category | Flow Control |
+| Primary material | Metal — 316L stainless steel (body) |
+| Price band | Over USD 1,000 |
+| Key certification | ATEX |
+
 ## Overview
 
 The GX-200 is a pneumatically actuated control valve for regulating liquid and

@@ -1,0 +1,11 @@
+{
+  "metadataAttributes": {
+    "sku": { "value": { "type": "STRING", "stringValue": "AC-H13/AC-H14" } },
+    "category": { "value": { "type": "STRING", "stringValue": "Air Filtration" } },
+    "material": { "value": { "type": "STRING", "stringValue": "composite" } },
+    "price_band": { "value": { "type": "STRING", "stringValue": "under_500" } },
+    "unit_price": { "value": { "type": "NUMBER", "numberValue": 89 } },
+    "in_stock": { "value": { "type": "BOOLEAN", "booleanValue": true } },
+    "suppliers": { "value": { "type": "STRING_LIST", "stringListValue": ["Meridian Components", "Apex Industrial Supply"] } }
+  }
+}

@@ -4,6 +4,15 @@
 **Category:** Air Filtration
 **Availability:** In stock
 
+## Classification
+
+| Attribute | Value |
+|---|---|
+| Category | Air Filtration |
+| Primary material | Composite — glass-microfiber media in anodized aluminum frame |
+| Price band | Under USD 500 |
+| Key certification | EN 1822 |
+
 ## Overview
 
 The AeroClean series provides HEPA-grade air filtration cartridges for cleanroom

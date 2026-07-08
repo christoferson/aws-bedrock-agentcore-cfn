@@ -1,0 +1,11 @@
+{
+  "metadataAttributes": {
+    "supplier_id": { "value": { "type": "STRING", "stringValue": "SUP-NOR-003" } },
+    "supplier_name": { "value": { "type": "STRING", "stringValue": "Nordic Actuation" } },
+    "country": { "value": { "type": "STRING", "stringValue": "Sweden" } },
+    "status": { "value": { "type": "STRING", "stringValue": "approved" } },
+    "single_source": { "value": { "type": "BOOLEAN", "booleanValue": true } },
+    "max_lead_time_weeks": { "value": { "type": "NUMBER", "numberValue": 10 } },
+    "supplies_products": { "value": { "type": "STRING_LIST", "stringListValue": ["GX-200", "LC-9"] } }
+  }
+}

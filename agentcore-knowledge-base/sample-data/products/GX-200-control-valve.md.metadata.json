@@ -1,0 +1,11 @@
+{
+  "metadataAttributes": {
+    "sku": { "value": { "type": "STRING", "stringValue": "GX-200" } },
+    "category": { "value": { "type": "STRING", "stringValue": "Flow Control" } },
+    "material": { "value": { "type": "STRING", "stringValue": "metal" } },
+    "price_band": { "value": { "type": "STRING", "stringValue": "over_1000" } },
+    "unit_price": { "value": { "type": "NUMBER", "numberValue": 1180 } },
+    "in_stock": { "value": { "type": "BOOLEAN", "booleanValue": false } },
+    "suppliers": { "value": { "type": "STRING_LIST", "stringListValue": ["Apex Industrial Supply", "Nordic Actuation"] } }
+  }
+}
