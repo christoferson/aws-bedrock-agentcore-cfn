@@ -1,11 +1,10 @@
 {
   "metadataAttributes": {
-    "supplier_id": { "value": { "type": "STRING", "stringValue": "SUP-MER-001" } },
-    "supplier_name": { "value": { "type": "STRING", "stringValue": "Meridian Components" } },
-    "country": { "value": { "type": "STRING", "stringValue": "United Kingdom" } },
-    "status": { "value": { "type": "STRING", "stringValue": "preferred" } },
-    "single_source": { "value": { "type": "BOOLEAN", "booleanValue": false } },
-    "max_lead_time_weeks": { "value": { "type": "NUMBER", "numberValue": 6 } },
-    "supplies_products": { "value": { "type": "STRING_LIST", "stringListValue": ["PX-4100", "LC-9", "AC-H13/AC-H14"] } }
+    "supplier_id": { "value": { "type": "string", "stringValue": "SUP-MER-001" } },
+    "supplier_name": { "value": { "type": "string", "stringValue": "Meridian Components" } },
+    "country": { "value": { "type": "string", "stringValue": "United Kingdom" } },
+    "status": { "value": { "type": "string", "stringValue": "preferred" } },
+    "sourcing": { "value": { "type": "string", "stringValue": "multi_source" } },
+    "max_lead_time_weeks": { "value": { "type": "number", "numberValue": 6 } }
   }
 }

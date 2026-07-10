@@ -1,11 +1,10 @@
 {
   "metadataAttributes": {
-    "sku": { "value": { "type": "STRING", "stringValue": "LC-9" } },
-    "category": { "value": { "type": "STRING", "stringValue": "Energy Storage" } },
-    "material": { "value": { "type": "STRING", "stringValue": "non-metal" } },
-    "price_band": { "value": { "type": "STRING", "stringValue": "over_500" } },
-    "unit_price": { "value": { "type": "NUMBER", "numberValue": 640 } },
-    "in_stock": { "value": { "type": "BOOLEAN", "booleanValue": true } },
-    "suppliers": { "value": { "type": "STRING_LIST", "stringListValue": ["Meridian Components", "Nordic Actuation"] } }
+    "sku": { "value": { "type": "string", "stringValue": "LC-9" } },
+    "category": { "value": { "type": "string", "stringValue": "Energy Storage" } },
+    "material": { "value": { "type": "string", "stringValue": "non-metal" } },
+    "price_band": { "value": { "type": "string", "stringValue": "over_500" } },
+    "unit_price": { "value": { "type": "number", "numberValue": 640 } },
+    "availability": { "value": { "type": "string", "stringValue": "in_stock" } }
   }
 }

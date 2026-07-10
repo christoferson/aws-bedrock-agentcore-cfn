@@ -1,11 +1,10 @@
 {
   "metadataAttributes": {
-    "supplier_id": { "value": { "type": "STRING", "stringValue": "SUP-APX-002" } },
-    "supplier_name": { "value": { "type": "STRING", "stringValue": "Apex Industrial Supply" } },
-    "country": { "value": { "type": "STRING", "stringValue": "United States" } },
-    "status": { "value": { "type": "STRING", "stringValue": "approved" } },
-    "single_source": { "value": { "type": "BOOLEAN", "booleanValue": false } },
-    "max_lead_time_weeks": { "value": { "type": "NUMBER", "numberValue": 8 } },
-    "supplies_products": { "value": { "type": "STRING_LIST", "stringListValue": ["PX-4100", "GX-200", "AC-H13/AC-H14"] } }
+    "supplier_id": { "value": { "type": "string", "stringValue": "SUP-APX-002" } },
+    "supplier_name": { "value": { "type": "string", "stringValue": "Apex Industrial Supply" } },
+    "country": { "value": { "type": "string", "stringValue": "United States" } },
+    "status": { "value": { "type": "string", "stringValue": "approved" } },
+    "sourcing": { "value": { "type": "string", "stringValue": "multi_source" } },
+    "max_lead_time_weeks": { "value": { "type": "number", "numberValue": 8 } }
   }
 }

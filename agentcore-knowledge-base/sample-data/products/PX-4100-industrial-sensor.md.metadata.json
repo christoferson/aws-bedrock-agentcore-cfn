@@ -1,11 +1,10 @@
 {
   "metadataAttributes": {
-    "sku": { "value": { "type": "STRING", "stringValue": "PX-4100" } },
-    "category": { "value": { "type": "STRING", "stringValue": "Industrial Sensors" } },
-    "material": { "value": { "type": "STRING", "stringValue": "metal" } },
-    "price_band": { "value": { "type": "STRING", "stringValue": "under_500" } },
-    "unit_price": { "value": { "type": "NUMBER", "numberValue": 249 } },
-    "in_stock": { "value": { "type": "BOOLEAN", "booleanValue": true } },
-    "suppliers": { "value": { "type": "STRING_LIST", "stringListValue": ["Meridian Components", "Apex Industrial Supply"] } }
+    "sku": { "value": { "type": "string", "stringValue": "PX-4100" } },
+    "category": { "value": { "type": "string", "stringValue": "Industrial Sensors" } },
+    "material": { "value": { "type": "string", "stringValue": "metal" } },
+    "price_band": { "value": { "type": "string", "stringValue": "under_500" } },
+    "unit_price": { "value": { "type": "number", "numberValue": 249 } },
+    "availability": { "value": { "type": "string", "stringValue": "in_stock" } }
   }
 }
