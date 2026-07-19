@@ -245,3 +245,112 @@ AWS::BedrockAgentCore::Harness
 - **Tags**: `Array of Tag` (Key/Value objects) — same as `AWS::Lambda::Function`, NOT the flat map used by Gateway/Runtime.
 - **Tool type must match Config**: `Type: agentcore_gateway` → `Config.AgentCoreGateway`; `Type: inline_function` → `Config.InlineFunction`, etc.
 - **cfn-lint**: `E3001` and `E1010` on `AWS::BedrockAgentCore::Harness` are false positives — suppress with `--ignore-checks E3001 E1010`.
+
+---
+
+## Execution Role — Required IAM Permissions
+
+Source: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonbedrockagentcore.html
+Verified: June 2026
+
+The Harness execution role needs permissions in four categories:
+
+### 1. Bedrock model inference
+```json
+{ "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+  "Resource": ["arn:aws:bedrock:*::foundation-model/*", "arn:aws:bedrock:<region>:<account>:*"] }
+```
+
+### 2. CloudWatch Logs / X-Ray / Metrics
+Standard observability permissions scoped to `/aws/bedrock-agentcore/*` and namespace `bedrock-agentcore`.
+
+### 3. Gateway invocation (if tools are wired)
+```json
+{ "Action": "bedrock-agentcore:InvokeGateway",
+  "Resource": "arn:aws:bedrock-agentcore:<region>:<account>:gateway/*" }
+```
+
+### 4. Session event store — **required at runtime even without explicit Memory config**
+The Harness calls these to read/write session history. `ListEvents` was the reported missing permission.
+All four actions require the `memory` resource ARN.
+
+| Action | Access Level | Notes |
+|---|---|---|
+| `bedrock-agentcore:CreateEvent` | Write | Condition keys: `sessionId`, `actorId` |
+| `bedrock-agentcore:GetEvent` | Read | Condition keys: `sessionId`, `actorId` |
+| `bedrock-agentcore:ListEvents` | List | Condition keys: `sessionId`, `actorId` |
+| `bedrock-agentcore:DeleteEvent` | Write | Condition keys: `sessionId`, `actorId` |
+
+```json
+{ "Action": ["bedrock-agentcore:CreateEvent", "bedrock-agentcore:GetEvent",
+             "bedrock-agentcore:ListEvents", "bedrock-agentcore:DeleteEvent"],
+  "Resource": "arn:aws:bedrock-agentcore:<region>:<account>:memory/*" }
+```
+
+### 5. Long-term memory records (needed only when `Memory` is configured in the Harness)
+```json
+{ "Action": ["bedrock-agentcore:BatchCreateMemoryRecords", "bedrock-agentcore:BatchUpdateMemoryRecords",
+             "bedrock-agentcore:BatchDeleteMemoryRecords", "bedrock-agentcore:GetMemoryRecord",
+             "bedrock-agentcore:ListMemoryRecords", "bedrock-agentcore:DeleteMemoryRecord",
+             "bedrock-agentcore:ListActors", "bedrock-agentcore:ListMemoryExtractionJobs",
+             "bedrock-agentcore:GetMemory"],
+  "Resource": "arn:aws:bedrock-agentcore:<region>:<account>:memory/*" }
+
+---
+
+## Memory — `AWS::BedrockAgentCore::Memory`
+
+Source: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-memory.html
+Saved: June 2026
+
+### Properties
+
+| Property | Type | Required | Update | Notes |
+|---|---|---|---|---|
+| `Name` | String | **Yes** | Replacement | Pattern: `^[a-zA-Z][a-zA-Z0-9_]{0,47}$` |
+| `EventExpiryDuration` | Integer | **Yes** | No interruption | Days; min 3, max 365. Applied per event at write time — does not backfill existing events. |
+| `Description` | String | No | No interruption | |
+| `EncryptionKeyArn` | String | No | Replacement | Customer-managed KMS key ARN |
+| `MemoryExecutionRoleArn` | String | No | No interruption | IAM role for memory operations |
+| `MemoryStrategies` | Array of MemoryStrategy | No | No interruption | Long-term extraction strategies |
+| `IndexedKeys` | Array of IndexedKey | No | No interruption | 1–10; only indexed keys usable in metadata filters |
+| `StreamDeliveryResources` | StreamDeliveryResources | No | No interruption | Stream memory records to external targets |
+| `Tags` | Object of String | No | No interruption | Flat map (same as Gateway/Runtime, not Array of Tag) |
+
+### Return Values
+
+`Ref` → Memory ARN (e.g. `arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/MyMemory-a1b2c3d4e5`)
+
+`Fn::GetAtt`: `MemoryArn`, `MemoryId`, `Status`, `CreatedAt`, `UpdatedAt`, `FailureReason`
+
+### MemoryStrategy (Union — include one or more sub-keys)
+
+| Sub-key | Required fields | NamespaceTemplates default |
+|---|---|---|
+| `SemanticMemoryStrategy` | `Name` | `/facts/{actorId}/` |
+| `SummaryMemoryStrategy` | `Name` | `/summary/{actorId}/{sessionId}/` |
+| `UserPreferenceMemoryStrategy` | `Name` | `/users/{actorId}/preferences/` |
+| `EpisodicMemoryStrategy` | `Name` | `/episodes/{actorId}/` |
+| `CustomMemoryStrategy` | `Name` | User-defined |
+
+`NamespaceTemplates` is optional — omit to use the default path.
+`{actorId}` and `{sessionId}` are template variables filled at runtime from the invocation parameters.
+
+### Wiring Memory to a Harness
+
+```yaml
+Memory:
+  AgentCoreMemoryConfiguration:
+    Arn: !GetAtt Memory.MemoryArn   # ARN of the AWS::BedrockAgentCore::Memory resource
+    MessagesCount: 20               # recent short-term messages to load per invocation (optional)
+    ActorId: default                # default actor scope; callers can override at invoke time (optional)
+```
+
+### Key Behaviours (from dev guide)
+
+- **Short-term memory**: raw events (messages, tool calls) per session. Gives continuity across turns without the caller passing history.
+- **Long-term memory**: extracted from events via strategies; retrieved via semantic search and injected into context on each invocation automatically.
+- **actorId scoping**: each actor gets isolated short-term and long-term memory. Pass `actorId` at invoke time per user.
+- **Managed vs BYO**: omitting `Memory` on the Harness auto-provisions managed memory with defaults. BYO (`agentCoreMemoryConfiguration`) is needed for shared memory across harnesses, custom KMS, or custom namespaces.
+- **Retrieval defaults**: `topK=10`, `relevanceScore=0.2`. Override by setting `retrievalConfig` in the BYO config.
+- **Deletion**: `DeleteHarness` cascade-deletes managed memory by default. Pass `deleteManagedMemory=false` to detach instead.

@@ -197,18 +197,33 @@ TargetConfiguration:
     ...
 ```
 
-**Lambda invocation contract:**
+**Lambda invocation contract (aggregated mode — the only mode):**
 
-```json
-// tools/list request
-{ "method": "tools/list" }
+Gateway handles `tools/list` itself from the registered schema. The Lambda is only called for tool execution.
 
-// tools/call request
-{ "method": "tools/call", "params": { "name": "<tool>", "arguments": { ... } } }
+```python
+# event = flat map of tool arguments directly (no MCP envelope)
+# { "keywords": "wireless headphones", "category": "electronics" }
 
-// expected tools/call response
-{ "content": [{ "type": "text", "text": "<result>" }], "isError": false }
+def lambda_handler(event, context):
+    # Tool name is in context.client_context.custom, not in event
+    # Format: "${target_name}___${tool_name}" (triple underscore)
+    original = context.client_context.custom['bedrockAgentCoreToolName']
+    tool_name = original[original.index("___") + 3:]   # strip target prefix
+
+    # Other metadata available:
+    # context.client_context.custom['bedrockAgentCoreMessageVersion']
+    # context.client_context.custom['bedrockAgentCoreAwsRequestId']
+    # context.client_context.custom['bedrockAgentCoreMcpMessageId']
+    # context.client_context.custom['bedrockAgentCoreGatewayId']
+    # context.client_context.custom['bedrockAgentCoreTargetId']
+
+    # event is the arguments dict — access properties directly
+    result = do_something(event.get("location", ""))
+    return {"content": [{"type": "text", "text": result}], "isError": False}
 ```
+
+Source: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-lambda.html
 
 ---
 
