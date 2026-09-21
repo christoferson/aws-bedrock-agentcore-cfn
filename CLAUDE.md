@@ -21,6 +21,13 @@ If you need current AWS behavior or CFN property details, **fetch the doc and
 save it into `aws-documentation/`**, then cite it in template comments. Never
 change a template to contradict a saved doc without fetching an updated source.
 
+Existing saved docs:
+- `agentcore-runtime.md` — CFN resource, properties, network/VPC, IAM execution role, service contract
+- `agentcore-gateway.md` — CFN Gateway + GatewayTarget, auth types, interceptors, policy engine, dual-Lambda permission
+- `agentcore-gateway-connector.md` — ConnectorTargetConfiguration, web-search + knowledge-bases connectors
+- `agentcore-identity.md` — WorkloadIdentity, ApiKeyCredentialProvider, OAuth2CredentialProvider CFN reference
+- `agentcore-harness.md` — Harness resource, all sub-property types, tool types, model configs, truncation strategies
+
 ### Cross-stack parameter convention
 All stacks pass values between layers via **explicit parameters** only.
 - Each stack has `Outputs:` — the operator reads them and passes them as

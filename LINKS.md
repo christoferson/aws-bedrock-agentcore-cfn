@@ -15,6 +15,8 @@ Saved documentation snapshots are in `aws-documentation/`.
 | `AWS::BedrockAgentCore::Memory` | https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrockagentcore-memory.html |
 | `AWS::Bedrock::KnowledgeBase` (MANAGED type) | https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-bedrock-knowledgebase.html |
 | `AWS::S3Vectors::VectorBucket` | https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-s3vectors-vectorbucket.html |
+| `AWS::S3Vectors::Index` | https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-s3vectors-index.html |
+| `S3VectorsConfiguration` sub-property | https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-bedrock-knowledgebase-s3vectorsconfiguration.html |
 
 ---
 
@@ -65,7 +67,12 @@ Saved documentation snapshots are in `aws-documentation/`.
 ### Knowledge Base
 | Topic | URL |
 |---|---|
-| Managed knowledge base (MANAGED type, no StorageConfiguration) | https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-managed.html |
+| **Managed KB overview** (managed vs customer-managed comparison table) | https://docs.aws.amazon.com/bedrock/latest/userguide/kb-build-managed.html |
+| **Managed KB create** (CFN/API, embedding options, connector config) | https://docs.aws.amazon.com/bedrock/latest/userguide/kb-managed-create.html |
+| **Managed KB ingestion customization** (chunking strategies, smart parsing) | https://docs.aws.amazon.com/bedrock/latest/userguide/kb-managed-customize-ingestion.html |
+| **Managed KB Gateway connector** (AgenticRetrieveStream, Retrieve tools) | https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-target-connector-managed-kb.html |
+| **S3 Vectors setup** (bucket ARN + index ARN required; no IndexName in CFN) | https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-setup.html |
+| Create knowledge base (API request shape) | https://docs.aws.amazon.com/bedrock/latest/userguide/knowledge-base-create.html |
 
 ---
 
@@ -91,7 +98,8 @@ Saved documentation snapshots are in `aws-documentation/`.
 
 - **Lambda target invocation** — one mode only (aggregated): `event` = flat args dict; tool name in `context.client_context.custom["bedrockAgentCoreToolName"]`; delimiter `___`; Gateway handles `tools/list` from registered schema.
 - **Lambda in VPC** — requires `AWSLambdaVPCAccessExecutionRole` (adds `ec2:CreateNetworkInterface`, `ec2:DescribeNetworkInterfaces`, `ec2:DeleteNetworkInterface`).
-- **Three AgentCore VPC endpoints** — `bedrock-agentcore` (data plane), `bedrock-agentcore.gateway` (Gateway data plane — **required** for `agentcore_gateway` tools), `bedrock-agentcore-control` (control plane). Missing the gateway endpoint causes `[Errno -2]` when Harness tries to reach a Gateway tool.
-- **Gateway DNS in VPC** — `PrivateDnsEnabled: true` on the `bedrock-agentcore` data plane endpoint intercepts the whole `bedrock-agentcore.<region>.amazonaws.com` zone; Gateway URL subdomains resolve to NXDOMAIN. Fix: `PrivateDnsEnabled: false` on data plane endpoint only. The `bedrock-agentcore.gateway` endpoint uses `PrivateDnsEnabled: true` (its own separate zone, no conflict).
+- **Three AgentCore VPC endpoints** — `bedrock-agentcore` (data plane), `bedrock-agentcore.gateway` (Gateway data plane — **required** for `agentcore_gateway` tools), `bedrock-agentcore-control` (control plane). All three use `PrivateDnsEnabled: true`. Missing the `bedrock-agentcore.gateway` endpoint is the root cause of `[Errno -2] Name or service not known` when a Harness in VPC mode tries to reach a Gateway tool.
 - **Dual Lambda permission** — both `AWS::Lambda::Permission` (Principal: bedrock-agentcore.amazonaws.com) AND IAM `lambda:InvokeFunction` on GatewayRole are required.
+- **S3VectorsConfiguration oneOf** — `IndexArn` and `IndexName` are mutually exclusive identifiers. Supply only `VectorBucketArn` + `IndexArn` (preferred — ARN is stable). Providing all three triggers "2 subschemas matched instead of one" CFN validation error.
+- **S3Vectors KB index** — Bedrock does NOT auto-create the index. You must create `AWS::S3Vectors::Index` first (`DataType: float32`, `Dimension` matching embedding model, `DistanceMetric: cosine`) and pass its `IndexArn` to `S3VectorsConfiguration`.
 - **AllowedClients vs AllowedAudience** — use `AllowedClients` (matches `client_id` claim, works for both ID and access tokens); `AllowedAudience` matches `aud` claim which breaks for access tokens.
