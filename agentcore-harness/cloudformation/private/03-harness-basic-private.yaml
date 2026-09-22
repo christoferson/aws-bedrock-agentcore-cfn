@@ -16,16 +16,16 @@ Metadata:
         Parameters:
           - HarnessExecutionRoleArn
       - Label:
-          default: Network (existing VPC + from stack 02-network)
+          default: Network (from stack 02-network)
         Parameters:
-          - PrivateSubnetIds
+          - HarnessPrivateSubnetIds
           - HarnessSecurityGroupId
       - Label:
           default: Agent configuration
         Parameters:
-          - ModelId
-          - MaxIterations
-          - TimeoutSeconds
+          - FoundationModelId
+          - AgentMaxIterations
+          - AgentTimeoutSeconds
     ParameterLabels:
       ApplicationName:
         default: Application name prefix
@@ -33,15 +33,15 @@ Metadata:
         default: Deployment environment (dev / stg / prd)
       HarnessExecutionRoleArn:
         default: Harness execution role ARN (01-iam output)
-      PrivateSubnetIds:
+      HarnessPrivateSubnetIds:
         default: Private subnet IDs (comma-separated, same list passed to 02-network)
       HarnessSecurityGroupId:
         default: Harness security group ID (02-network output)
-      ModelId:
+      FoundationModelId:
         default: Bedrock model ID
-      MaxIterations:
+      AgentMaxIterations:
         default: Max agent loop iterations per invocation
-      TimeoutSeconds:
+      AgentTimeoutSeconds:
         default: Max duration per invocation (seconds)
 
 Parameters:
@@ -55,19 +55,19 @@ Parameters:
   HarnessExecutionRoleArn:
     Type: String
     Description: HarnessExecutionRoleArn from stack 01-iam
-  PrivateSubnetIds:
+  HarnessPrivateSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: Comma-separated list of existing private subnet IDs
   HarnessSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: HarnessSecurityGroupId from stack 02-network
-  ModelId:
+  FoundationModelId:
     Type: String
     Default: global.anthropic.claude-sonnet-4-6
-  MaxIterations:
+  AgentMaxIterations:
     Type: Number
     Default: 100
-  TimeoutSeconds:
+  AgentTimeoutSeconds:
     Type: Number
     Default: 300
 
@@ -81,20 +81,20 @@ Resources:
       ExecutionRoleArn: !Ref HarnessExecutionRoleArn
       Model:
         BedrockModelConfig:
-          ModelId: !Ref ModelId
+          ModelId: !Ref FoundationModelId
           ApiFormat: converse_stream
       SystemPrompt:
-        - Text: !Sub "You are a helpful assistant deployed by ${ApplicationName} in the ${Environment} environment."
+        - Text: "You are a helpful assistant."
       Environment:
         AgentCoreRuntimeEnvironment:
           NetworkConfiguration:
             NetworkMode: VPC  # places harness ENIs in private subnets; no inbound public endpoint
             NetworkModeConfig:
-              Subnets: !Ref PrivateSubnetIds
+              Subnets: !Ref HarnessPrivateSubnetIds
               SecurityGroups:
                 - !Ref HarnessSecurityGroupId
-      MaxIterations: !Ref MaxIterations
-      TimeoutSeconds: !Ref TimeoutSeconds
+      MaxIterations: !Ref AgentMaxIterations
+      TimeoutSeconds: !Ref AgentTimeoutSeconds
       Truncation:
         Strategy: sliding_window
       Tags:
