@@ -1,5 +1,44 @@
+# Stack 2/5 — Network. Runtime runs in private subnets; internet access is via NAT, not a public endpoint.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: VPC, public/private subnets, NAT gateway, runtime security group
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: VPC CIDR
+        Parameters:
+          - VpcCidr
+      - Label:
+          default: Public Subnet CIDRs (NAT gateway lives here)
+        Parameters:
+          - PublicSubnet1Cidr
+          - PublicSubnet2Cidr
+      - Label:
+          default: Private Subnet CIDRs (Runtime lives here)
+        Parameters:
+          - PrivateSubnet1Cidr
+          - PrivateSubnet2Cidr
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      VpcCidr:
+        default: VPC CIDR block
+      PublicSubnet1Cidr:
+        default: Public subnet 1 CIDR (AZ 0)
+      PublicSubnet2Cidr:
+        default: Public subnet 2 CIDR (AZ 1)
+      PrivateSubnet1Cidr:
+        default: Private subnet 1 CIDR (AZ 0)
+      PrivateSubnet2Cidr:
+        default: Private subnet 2 CIDR (AZ 1)
 
 Parameters:
   ApplicationName:
@@ -27,37 +66,38 @@ Parameters:
 
 Resources:
 
+  # --- VPC ---
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: !Ref VpcCidr
-      EnableDnsSupport: true
+      EnableDnsSupport: true   # required for ECR and Bedrock API resolution inside VPC
       EnableDnsHostnames: true
       Tags:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-vpc"
 
   InternetGateway:
-    Type: AWS::EC2::InternetGateway
+    Type: AWS::EC2::InternetGateway # needed so the NAT gateway can reach the internet
     Properties:
       Tags:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-igw"
 
   VpcGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
+    Type: AWS::EC2::VPCGatewayAttachment # attaches IGW to the VPC
     Properties:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref InternetGateway
 
-  # --- Public subnets (2 AZ) ---
+  # --- Public subnets (2 AZ) — only the NAT gateway lives here; no instances ---
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnet1Cidr
       AvailabilityZone: !Select [0, !GetAZs ""]
-      MapPublicIpOnLaunch: false
+      MapPublicIpOnLaunch: false # no direct public IPs assigned; NAT handles outbound
       Tags:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-public-1"
@@ -73,15 +113,15 @@ Resources:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-public-2"
 
-  # --- NAT gateway in public subnet 1 ---
+  # --- NAT gateway in public subnet 1 (single AZ — cost trade-off for non-prod) ---
   NatEip:
     Type: AWS::EC2::EIP
-    DependsOn: VpcGatewayAttachment
+    DependsOn: VpcGatewayAttachment # IGW must be attached before allocating EIP
     Properties:
       Domain: vpc
 
   NatGateway:
-    Type: AWS::EC2::NatGateway
+    Type: AWS::EC2::NatGateway # provides outbound internet for private subnets
     Properties:
       AllocationId: !GetAtt NatEip.AllocationId
       SubnetId: !Ref PublicSubnet1
@@ -89,7 +129,7 @@ Resources:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-nat"
 
-  # --- Private subnets (2 AZ) ---
+  # --- Private subnets (2 AZ) — Runtime containers run here, no inbound from internet ---
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -120,7 +160,7 @@ Resources:
           Value: !Sub "${ApplicationName}-${Environment}-public-rt"
 
   PublicDefaultRoute:
-    Type: AWS::EC2::Route
+    Type: AWS::EC2::Route # 0.0.0.0/0 → IGW for NAT gateway outbound traffic
     DependsOn: VpcGatewayAttachment
     Properties:
       RouteTableId: !Ref PublicRouteTable
@@ -148,7 +188,7 @@ Resources:
           Value: !Sub "${ApplicationName}-${Environment}-private-rt"
 
   PrivateDefaultRoute:
-    Type: AWS::EC2::Route
+    Type: AWS::EC2::Route # 0.0.0.0/0 → NAT; private subnets have no direct internet path
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: "0.0.0.0/0"
@@ -166,7 +206,7 @@ Resources:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
 
-  # --- Runtime security group (no inbound; egress to internet via NAT) ---
+  # --- Runtime security group (no inbound; HTTPS egress to internet via NAT) ---
   RuntimeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -176,7 +216,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
-          CidrIp: "0.0.0.0/0"
+          CidrIp: "0.0.0.0/0"  # outbound HTTPS only; container never accepts inbound connections
       Tags:
         - Key: Name
           Value: !Sub "${ApplicationName}-${Environment}-runtime-sg"

@@ -1,5 +1,29 @@
+# Stack 3/5 — CI/CD. Upload agent/source.zip to SourceBucket; the pipeline builds and pushes the ECR image.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: ECR repository, S3 source bucket, CodeBuild (ARM64), CodePipeline
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+      - Label:
+          default: IAM (from stack 01-iam)
+        Parameters:
+          - CodeBuildRoleArn
+          - CodePipelineRoleArn
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
+      CodeBuildRoleArn:
+        default: CodeBuild role ARN (01-iam output)
+      CodePipelineRoleArn:
+        default: CodePipeline role ARN (01-iam output)
 
 Parameters:
   ApplicationName:
@@ -18,13 +42,13 @@ Parameters:
 
 Resources:
 
-  # --- ECR ---
+  # --- ECR repository — stores ARM64 agent container images ---
   EcrRepository:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Sub "${ApplicationName}-${Environment}-web-search-agent"
       ImageScanningConfiguration:
-        ScanOnPush: true
+        ScanOnPush: true # basic CVE scan on every push; no extra cost
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
@@ -41,20 +65,20 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # --- S3 source bucket (versioning required for S3 source stage) ---
+  # --- S3 source bucket (versioning required — CodePipeline S3 source detects new object versions) ---
   SourceBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${ApplicationName}-${Environment}-source-${AWS::AccountId}"
       VersioningConfiguration:
-        Status: Enabled
+        Status: Enabled # CodePipeline S3 source requires versioning to detect changes
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
       OwnershipControls:
         Rules:
-          - ObjectOwnership: BucketOwnerEnforced
+          - ObjectOwnership: BucketOwnerEnforced # disables ACLs; BucketOwnerEnforced is required for PutObject without ACL header
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -67,7 +91,7 @@ Resources:
           Value: !Ref Environment
 
   SourceBucketPolicy:
-    Type: AWS::S3::BucketPolicy
+    Type: AWS::S3::BucketPolicy # denies any non-HTTPS access to the source bucket
     Properties:
       Bucket: !Ref SourceBucket
       PolicyDocument:
@@ -83,7 +107,7 @@ Resources:
               Bool:
                 aws:SecureTransport: false
 
-  # --- Artifact bucket ---
+  # --- Artifact bucket — CodePipeline stores inter-stage artifacts here ---
   ArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -103,7 +127,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # --- CodeBuild (ARM64, PrivilegedMode for docker buildx) ---
+  # --- CodeBuild project (ARM64, PrivilegedMode for Docker daemon) ---
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -112,8 +136,8 @@ Resources:
       Environment:
         Type: ARM_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
-        PrivilegedMode: true
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0 # ARM64 image for linux/arm64 platform builds
+        PrivilegedMode: true # required to run the Docker daemon inside CodeBuild
         EnvironmentVariables:
           - Name: ECR_REPO_URI
             Value: !GetAtt EcrRepository.RepositoryUri
@@ -123,7 +147,7 @@ Resources:
             Value: !Ref AWS::Region
       Source:
         Type: CODEPIPELINE
-        BuildSpec: buildspec.yml
+        BuildSpec: buildspec.yml # reads from agent/buildspec.yml in the source zip
       Artifacts:
         Type: CODEPIPELINE
       Tags:
@@ -132,7 +156,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # --- CodePipeline (S3 source → CodeBuild) ---
+  # --- CodePipeline (S3 source → CodeBuild; polls every minute via PollForSourceChanges) ---
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -152,8 +176,8 @@ Resources:
                 Version: "1"
               Configuration:
                 S3Bucket: !Ref SourceBucket
-                S3ObjectKey: source.zip
-                PollForSourceChanges: true
+                S3ObjectKey: source.zip # upload agent folder zipped as source.zip to trigger a build
+                PollForSourceChanges: true # EventBridge not available for S3 source in all accounts
               OutputArtifacts:
                 - Name: SourceArtifact
         - Name: Build

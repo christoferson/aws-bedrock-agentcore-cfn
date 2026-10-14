@@ -1,5 +1,20 @@
+# Stack 1/5 — IAM. Deploy first; all downstream stacks consume these role ARNs.
 AWSTemplateFormatVersion: "2010-09-09"
 Description: IAM roles — ExecutionRole, GatewayRole, CodeBuildRole, CodePipelineRole
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Naming
+        Parameters:
+          - ApplicationName
+          - Environment
+    ParameterLabels:
+      ApplicationName:
+        default: Application name prefix
+      Environment:
+        default: Deployment environment (dev / stg / prd)
 
 Parameters:
   ApplicationName:
@@ -12,7 +27,7 @@ Parameters:
 
 Resources:
 
-  # --- Runtime execution role ---
+  # --- Runtime execution role (assumed by the AgentCore Runtime container) ---
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -26,7 +41,7 @@ Resources:
             Action: sts:AssumeRole
             Condition:
               StringEquals:
-                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceAccount: !Ref AWS::AccountId  # prevent confused-deputy attacks
               ArnLike:
                 aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
       Policies:
@@ -34,15 +49,15 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: ECRImageAccess # pull image layers
+              - Sid: ECRImageAccess # pull image layers from ECR
                 Effect: Allow
                 Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
                 Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*"
-              - Sid: ECRTokenAccess
+              - Sid: ECRTokenAccess # get-login-token is global, not per-repo
                 Effect: Allow
                 Action: ecr:GetAuthorizationToken
                 Resource: "*"
-              - Sid: CloudWatchLogs
+              - Sid: CloudWatchLogs # runtime writes structured logs here
                 Effect: Allow
                 Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents,
                          logs:DescribeLogGroups, logs:DescribeLogStreams]
@@ -52,20 +67,20 @@ Resources:
                 Action: [xray:PutTraceSegments, xray:PutTelemetryRecords,
                          xray:GetSamplingRules, xray:GetSamplingTargets]
                 Resource: "*"
-              - Sid: CloudWatchMetrics # namespace-scoped per docs
+              - Sid: CloudWatchMetrics # namespace-scoped per service docs
                 Effect: Allow
                 Action: cloudwatch:PutMetricData
                 Resource: "*"
                 Condition:
                   StringEquals:
                     cloudwatch:namespace: bedrock-agentcore
-              - Sid: BedrockModels
+              - Sid: BedrockModels # allow both sync and streaming inference
                 Effect: Allow
                 Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
                 Resource:
                   - arn:aws:bedrock:*::foundation-model/*
                   - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*"
-              - Sid: InvokeGateway # wildcard scoped to account — avoids circular dep with gateway stack
+              - Sid: InvokeGateway # wildcard avoids a circular dep with the gateway stack
                 Effect: Allow
                 Action: bedrock-agentcore:InvokeGateway
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*"
@@ -75,7 +90,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # --- Gateway service role ---
+  # --- Gateway service role (assumed by AgentCore Gateway to call the web-search connector) ---
   GatewayRole:
     Type: AWS::IAM::Role
     Properties:
@@ -99,7 +114,7 @@ Resources:
                 Effect: Allow
                 Action: bedrock-agentcore:InvokeGateway
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*"
-              - Sid: InvokeWebSearch # account segment is "aws" — AWS-owned tool
+              - Sid: InvokeWebSearch # resource account segment is "aws" — this is an AWS-managed tool
                 Effect: Allow
                 Action: bedrock-agentcore:InvokeWebSearch
                 Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1"
@@ -109,7 +124,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # --- CodeBuild role ---
+  # --- CodeBuild service role (builds and pushes the agent container image) ---
   CodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -126,13 +141,13 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: ECRPush
+              - Sid: ECRPush # full push lifecycle; GetAuthorizationToken is global
                 Effect: Allow
                 Action: [ecr:BatchCheckLayerAvailability, ecr:CompleteLayerUpload,
                          ecr:InitiateLayerUpload, ecr:PutImage, ecr:UploadLayerPart,
                          ecr:GetAuthorizationToken]
                 Resource: "*"
-              - Sid: S3Artifacts
+              - Sid: S3Artifacts # read source zip, write build artifacts
                 Effect: Allow
                 Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject]
                 Resource: !Sub "arn:aws:s3:::${ApplicationName}-${Environment}-*/*"
@@ -146,7 +161,7 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # --- CodePipeline role ---
+  # --- CodePipeline service role (orchestrates Source → Build stages) ---
   CodePipelineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -163,7 +178,7 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: S3Artifacts
+              - Sid: S3Artifacts # GetBucketVersioning required for S3 source detection
                 Effect: Allow
                 Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:GetBucketVersioning]
                 Resource:
